@@ -1,0 +1,106 @@
+# AquaControl sdkconfig.defaults — committed baseline
+# Edit this file (not sdkconfig). After changing, run: idf.py fullclean && idf.py build
+
+# -----------------------------------------------------------------------------
+# Target SoC
+# -----------------------------------------------------------------------------
+CONFIG_IDF_TARGET="esp32s3"
+
+# -----------------------------------------------------------------------------
+# Flash & partition table
+# -----------------------------------------------------------------------------
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+CONFIG_ESPTOOLPY_FLASHMODE_QIO=y
+CONFIG_ESPTOOLPY_FLASHFREQ_80M=y
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+CONFIG_PARTITION_TABLE_OFFSET=0x8000
+
+# -----------------------------------------------------------------------------
+# PSRAM — 8 MB Octal mode (ESP32-S3-WROOM-1-N4R8)
+# -----------------------------------------------------------------------------
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_MODE_OCT=y
+CONFIG_SPIRAM_SPEED_80M=y
+CONFIG_SPIRAM_USE_MALLOC=y
+CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y
+# Allocations <= 16KB go to internal SRAM (faster, DMA-capable)
+CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=16384
+CONFIG_SPIRAM_MALLOC_RESERVE_INTERNAL=32768
+
+# -----------------------------------------------------------------------------
+# C++17 + ESP-IDF disables exceptions/RTTI by default (keep them off)
+# -----------------------------------------------------------------------------
+CONFIG_COMPILER_CXX_EXCEPTIONS=n
+CONFIG_COMPILER_CXX_RTTI=n
+CONFIG_COMPILER_OPTIMIZATION_PERF=y
+
+# -----------------------------------------------------------------------------
+# Console — ESP32-S3 built-in USB Serial/JTAG on the USB-C connector
+# -----------------------------------------------------------------------------
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
+
+# -----------------------------------------------------------------------------
+# FreeRTOS — both cores enabled (S3 is dual-core)
+# -----------------------------------------------------------------------------
+CONFIG_FREERTOS_UNICORE=n
+CONFIG_FREERTOS_HZ=1000
+
+# -----------------------------------------------------------------------------
+# Watchdogs (development defaults — adjust for production)
+# -----------------------------------------------------------------------------
+CONFIG_ESP_TASK_WDT_PANIC=y
+CONFIG_ESP_TASK_WDT_TIMEOUT_S=10
+CONFIG_ESP_INT_WDT=y
+
+# -----------------------------------------------------------------------------
+# Coredump to UART so we can debug crashes without a hardware debugger
+# -----------------------------------------------------------------------------
+CONFIG_ESP_COREDUMP_ENABLE_TO_UART=y
+CONFIG_ESP_COREDUMP_DATA_FORMAT_ELF=y
+
+# -----------------------------------------------------------------------------
+# LVGL v9 — color depth, heap, performance monitor
+# -----------------------------------------------------------------------------
+CONFIG_LV_COLOR_DEPTH_16=y
+CONFIG_LV_COLOR_16_SWAP=n
+# Use stdlib malloc so LVGL allocations can spill into PSRAM via IDF heap_caps.
+# (Avoids ~1MB static BSS pool which overflows internal SRAM.)
+CONFIG_LV_USE_BUILTIN_MALLOC=n
+CONFIG_LV_USE_CLIB_MALLOC=y
+CONFIG_LV_USE_BUILTIN_STRING=n
+CONFIG_LV_USE_CLIB_STRING=y
+CONFIG_LV_USE_BUILTIN_SPRINTF=n
+CONFIG_LV_USE_CLIB_SPRINTF=y
+CONFIG_LV_USE_PERF_MONITOR=y
+CONFIG_LV_USE_LOG=y
+CONFIG_LV_LOG_LEVEL_WARN=y
+# Font support — we need UTF-8 (Cyrillic) handling
+CONFIG_LV_TXT_ENC_UTF8=y
+CONFIG_LV_USE_FONT_COMPRESSED=y
+# Built-in placeholder font (only used until Roboto fonts are generated)
+CONFIG_LV_FONT_MONTSERRAT_14=y
+CONFIG_LV_FONT_MONTSERRAT_18=y
+
+# -----------------------------------------------------------------------------
+# esp_lvgl_port — pin LVGL task to Core 1
+# -----------------------------------------------------------------------------
+# (Configured at runtime via lvgl_port_init() — kept here as a note)
+
+# -----------------------------------------------------------------------------
+# LCD subsystem — enable RGB panel support
+# -----------------------------------------------------------------------------
+CONFIG_LCD_RGB_ISR_IRAM_SAFE=y
+
+# -----------------------------------------------------------------------------
+# Logging — INFO during development, lower in production
+# -----------------------------------------------------------------------------
+CONFIG_LOG_DEFAULT_LEVEL_INFO=y
+CONFIG_LOG_COLORS=y
+CONFIG_LOG_TIMESTAMP_SOURCE_RTOS=y
+
+# -----------------------------------------------------------------------------
+# Main task stack — keep generous for app_main initialization sequence
+# -----------------------------------------------------------------------------
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
+CONFIG_ESP_MAIN_TASK_AFFINITY_CPU0=y

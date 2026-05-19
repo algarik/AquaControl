@@ -1,0 +1,38 @@
+# ESP-IDF build output
+build/
+sdkconfig
+sdkconfig.old
+managed_components/
+dependencies.lock
+
+# VS Code generated (keep workspace and settings shared)
+.vscode/c_cpp_properties.json
+.vscode/launch.json
+.vscode/ipch/
+
+# OS junk
+Thumbs.db
+.DS_Store
+*~
+
+# Editor swap files
+*.swp
+*.swo
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# Node (font generation tooling)
+node_modules/
+package-lock.json
+
+# Local secrets / credentials (never commit)
+secrets.h
+wifi_credentials.h
+
+# Coredump artifacts
+coredump.bin
+coredump_b64.txt
+*.coredump
