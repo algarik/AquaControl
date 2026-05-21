@@ -1,5 +1,8 @@
 # AquaControl — Implementation Plan
 
+> ⚠️ **STATUS: DISABLED — superseded by [`continued_implementation.md`](continued_implementation.md)**  
+> A deep code audit was performed. All remaining work is now tracked in `continued_implementation.md`.
+
 > **Status:** Draft v1.2 — updated with design review improvements  
 > **Date:** May 2026  
 > **Stack:** ESP-IDF 5.5.4 · C++ · LVGL v9.2+ · FreeRTOS  
@@ -535,6 +538,9 @@ class PwmDevice : public IDevice {             // 5 instances (PCA9685 ch 0-4)
     uint16_t fade_in_min;    // 0 = immediate
     uint16_t fade_out_min;
     void apply(bool active) override;
+    // Returns FADING_IN / FADING_OUT when Pca9685::is_fading() is true; IDLE otherwise.
+    enum class FadeStatus { IDLE, FADING_IN, FADING_OUT };
+    FadeStatus fade_status() const;
 };
 
 struct RgbColor { uint8_t r, g, b; };          // UI-framework-independent; convert to lv_color_t in UI layer only
@@ -1157,74 +1163,182 @@ per device.
 
 ## 10. Implementation Phases
 
-### Phase 1 — Foundation (Display + LVGL + Boot Screen)
+### Phase 1 — Foundation (Display + LVGL + Boot Screen) — ✅ **COMPLETE**
 **Goal:** See pixels on screen, touch working, boot console displayed.
 
-- [ ] ESP-IDF project skeleton (`idf.py create-project`)
-- [ ] `sdkconfig.defaults`: PSRAM enable, SPIRAM_MODE_OCT, LVGL config
-- [ ] `logger/ac_logger.h`: Logging macros (needed by everything below)
-- [ ] `i2c_bus/i2c_bus.cpp`: Mutex-protected I2C master bus (touch + later drivers all share it)
-- [ ] `display/display_driver.cpp`: `esp_lcd_new_rgb_panel()` with reference timing
-- [ ] `display/backlight.cpp`: LEDC PWM on GPIO 2
-- [ ] `touch/touch_gt911.cpp`: GT911 init via `esp_lcd_touch_gt911` component (uses shared I2C bus)
-- [ ] `display/lvgl_port.cpp`: LVGL init, flush callback, tick timer
-- [ ] `ui/boot_screen.cpp`: Boot console (static demo text first)
-- [ ] `ui/theme.cpp`: Colors + fonts (first pass)
-- [ ] **Deliverable:** Device boots, shows boot screen, touch navigates to blank dashboard
+- [x] ESP-IDF project skeleton (`idf.py create-project`)
+- [x] `sdkconfig.defaults`: PSRAM enable, SPIRAM_MODE_OCT, LVGL config
+- [x] `logger/ac_logger.h`: Logging macros (needed by everything below)
+- [x] `i2c_bus/i2c_bus.cpp`: Mutex-protected I2C master bus (touch + later drivers all share it)
+- [x] `display/display_driver.cpp`: `esp_lcd_new_rgb_panel()` with reference timing
+- [x] `display/backlight.cpp`: LEDC PWM on GPIO 2
+- [x] `touch/touch_gt911.cpp`: GT911 init via `esp_lcd_touch_gt911` component (uses shared I2C bus)
+- [x] `display/lvgl_port.cpp`: LVGL init, flush callback, tick timer
+- [x] `ui/boot_screen.cpp`: Boot console (static demo text first)
+- [x] `ui/theme.cpp`: Colors + fonts (first pass)
+- [x] **Deliverable:** Device boots, shows boot screen, touch hardware verified
+       (touch→dashboard navigation deferred to Phase 4 with `screen_manager`)
 
-> ⚠️ **Critical first challenge:** The display uses ILI6122+ILI5960 RGB
-> interface. If the exact timing parameters are wrong, the display will be
-> blank or show noise. We must precisely match the reference config timing.
-> Pixel clock at 15 MHz is confirmed safe by the reference.
+> ⚠️ **Field note (GT911 address):** The plan assumed 0x14, but the actual
+> board enumerated at **0x5D**. Touch driver now probes both candidates
+> (`AC_ADDR_GT911_PRIMARY = 0x5D`, `AC_ADDR_GT911_ALT = 0x14`) and uses
+> whichever responds. A boot-time I2C scan in `main.cpp` logs all bus
+> responders for diagnostics.
 
-### Phase 2 — I2C Drivers + Watchdog
+### Phase 2 — I2C Drivers + Watchdog ✅ COMPLETE
 **Goal:** All external hardware detected and controllable from CLI.
 
-- [ ] `i2c_bus/i2c_scanner.cpp`: Boot-time device scan (extends the bus from Phase 1)
-- [ ] `drivers/pcf8575.cpp`: Relay on/off
-- [ ] `drivers/pca9685.cpp`: PWM + fade engine (FreeRTOS timer)
-- [ ] `drivers/ds1307.cpp`: RTC read/write
-- [ ] `drivers/sht30.cpp`: Temp/humidity read + auto-detect variants
-- [ ] `i2c_bus`: Watchdog task
-- [ ] Boot screen integration: show real I2C scan results
-- [ ] Serial command: `scan`, `relay 1 on`, `pwm 2 50`
-- [ ] **Deliverable:** All hardware responds, boot log shows real device status
+- [x] `i2c_bus/i2c_scanner.cpp`: Boot-time device scan (extends the bus from Phase 1)
+- [x] `drivers/pcf8575.cpp`: Relay on/off
+- [x] `drivers/pca9685.cpp`: PWM + fade engine (FreeRTOS timer)
+- [x] `drivers/ds1307.cpp`: RTC read/write
+- [x] `drivers/sht30.cpp`: Temp/humidity read + auto-detect variants (driver = `sht3x.cpp`)
+- [x] `i2c_bus`: Watchdog task (graduated recovery: warn → bus pulse → fault flag + callback)
+- [x] Boot screen integration: show real I2C scan results
+- [ ] Serial command: `scan`, `relay 1 on`, `pwm 2 50` — **deferred** (driver self-tests via logs only, per session decision)
+- [x] **Build green** (`idf.py build` clean, 78% partition free)
+- [ ] **Deliverable:** All hardware responds, boot log shows real device status — **pending flash to COM3**
+
+> Field note (PCA9685): `MAX_DUTY=4095`, 1 kHz output, init enables AI+ALLCALL,
+> fade engine uses Q8.8 fixed-point steps and a single 100 ms FreeRTOS timer
+> that stops itself when no fades are active.
+>
+> **Fade bug fix (May 2026):** When `|delta| × 256 < ticks`, integer division
+> truncates `step_q8` to 0. For up-fades this caused the accumulator to never
+> advance (stuck at 0 forever); for down-fades the direction check `step_q8 >= 0`
+> was immediately true → fade completed in one tick. Fixed by clamping:
+> `if (f.step_q8 == 0 && delta != 0) f.step_q8 = (delta < 0) ? -1 : 1;`
+>
+> **`is_fading(chan)` API added (May 2026):** `Pca9685::is_fading(uint8_t chan) const`
+> returns `fades_[chan].active`. Used by `PwmDevice::fade_status()`.
+>
+> Field note (SHT3x): Uses cmd `0x24 0x00` (single-shot high-rep, no clock
+> stretch), 20 ms wait, CRC-8 poly 0x31 init 0xFF on each 2-byte word.
+>
+> Field note (Watchdog): ESP-IDF v5.5 master API has no hot bus-reset, so the
+> "reset" step issues a probe at 0x00 (never ACKs) to drive SCL high — usually
+> enough to unstick a line. A full bus deinit/re-init would invalidate every
+> driver's `i2c_master_dev_handle_t`; left for Phase 3 if needed.
+
+> **Strategy note (May 19 2026):** Phase 4 (UI) is intentionally deferred
+> until every backend that feeds the UI is implemented and verified. The
+> agreed order is **Block A (data plumbing) → B (config persistence) →
+> C (engine completion: solar + validator + history) → D (Phase 5 network:
+> WiFi/NTP/MQTT) → E (polish: serial-log ring, chip info, i18n) → Phase 4 UI**.
+> Rationale: every UI screen binds to a stable backend API; building UI on
+> placeholders forces rewiring later. Agent is to proceed autonomously
+> through this list without re-asking; only stop on hardware-blocking
+> failures or ambiguous design questions. UI work begins only when every
+> "needed-by-UI" backend listed in this section is checked off.
 
 ### Phase 3 — Core Logic (Devices + Triggers + Storage)
 **Goal:** Configure devices and triggers via code, see scheduler run.
 
-- [ ] `storage/nvs_store.cpp`: NVS wrapper
-- [ ] `devices/`: All device classes + `DeviceManager` (relay count from NVS)
-- [ ] `triggers/`: All trigger classes + `TriggerManager`
-- [ ] `triggers/trigger_validator.cpp`: Cross-validation logic (§6.4.1)
-- [ ] `scheduler/scheduler.cpp`: Dual-rate FreeRTOS evaluation loop (10s/30s)
-- [ ] `rtc/time_manager.cpp`: Unified time source
-- [ ] `solar/solar_calc.cpp`: SolarCalculator integration
-- [ ] `storage/history_log.cpp`: SPIFFS event history writer (append-only, circular)
-- [ ] Load/save all config to NVS
-- [ ] **Deliverable:** Hardcoded test config; scheduler activates relay at schedule time; history entries appear in SPIFFS
+**Status (foundation IN PROGRESS — solar / validator / history deferred):**
+- [x] `storage/nvs_store.cpp`: NVS wrapper (init handles NO_FREE_PAGES/NEW_VERSION; u8/u16/u32/i32/str/blob)
+- [x] `devices/`: `IDevice` + override engine, `RelayDevice` (PCF8575), `PwmDevice` (PCA9685 12-bit + fade), `RgbDevice` (3-channel R/G/B with brightness scaling), `DeviceManager`
+- [x] `triggers/`: `ITrigger` + `ScheduleTrigger` (with wrap-past-midnight), `TempTrigger` (with hysteresis), `SolarTrigger` skeleton, `TriggerManager` (per-device OR aggregation)
+- [ ] `triggers/trigger_validator.cpp`: Cross-validation logic (§6.4.1) — **deferred to Phase 3 follow-up**
+- [x] `scheduler/scheduler.cpp`: Dual-rate FreeRTOS task (10 s fast / 30 s full), pinned Core 0, priority 3, 4 KB stack; uses `IDevice::resolve_active` for overrides
+- [x] `rtc/time_manager.cpp` (under `components/time_mgr/`): DS1307-backed `settimeofday` seed, UTC-offset-aware `now_local()` / `minutes_since_midnight()`
+- [ ] `solar/solar_calc.cpp`: SolarCalculator integration — **deferred to Phase 3 follow-up**
+- [ ] `storage/history_log.cpp`: SPIFFS event history writer — **deferred to Phase 3 follow-up**
+- [ ] Load/save all config to NVS — **deferred to Phase 4 (UI drives writes)**
+- [x] Build-time RTC fallback (parses `__DATE__`/`__TIME__`) seeds DS1307 when invalid or year < 2024
+- [x] Hardcoded test config wired in `main.cpp`: 1 `RelayDevice` on PCF8575 ch 0 + 1 `ScheduleTrigger` firing ~1 min after boot for 3 min
+- [x] Boot-summary AC_DUMP extended with NVS / time-synced / device count / trigger count / scheduler-running lines
+- [x] **Build verified:** `idf.py build` — clean (Flash code 506 KB, Flash data 142 KB, DIRAM 23 %)
+- [x] **Hardware verification DONE (May 19 2026):** boot at 17:33:36 → `Relay 1 (test) -> ON` at exactly 17:34:00 (window start) → `Relay 1 (test) -> OFF` at exactly 17:37:00 (window stop). End devices not yet wired but logical pipeline (trigger → scheduler → resolve_active → driver) fully exercised.
+- [x] **Display fix (Phase 2 follow-up):** `display_driver.cpp` now zeroes the PSRAM framebuffer immediately after `esp_lcd_panel_init`, eliminating the random/shifted boot-screen contents on each reset (LVGL bounce-buffer partial mode was revealing stale PSRAM).
+
+- [x] **Deliverable (partial):** Hardcoded test config + scheduler activates relay at schedule time — VERIFIED.
+- [ ] **Deliverable (remainder):** History entries appear in SPIFFS — pending `storage/history_log.cpp`.
+
+### Phase 3.5 — Backend-First Pre-UI Backlog
+**Goal:** Implement every backend module the UI binds to, so Phase 4 is pure wiring.
+
+**Block A — data plumbing (no network):**
+- [x] A1 `sensors/sensor_sampler.cpp`: periodic SHT3x task; caches `{temp_c, rh, ts, valid}` per sensor; thread-safe getters
+- [x] A2 Wire `TempTrigger` to sensor cache via scheduler (calls `update_temperature` each fast tick)
+- [x] A3 Active-trigger tracking on `IDevice` (`last_driver_trigger_id`); scheduler writes it on every pass
+- [x] A4 Touch-activity tracker (single `last_input_ts` updated by LVGL input callback)
+- [x] A5 Fault registry (singleton; I2C watchdog pushes faults; UI queries list)
+
+**Block B — config persistence:**
+- [x] B6 `SystemConfig` struct + NVS load/save (lat/lon, tz, dim levels/timeout, language, temp unit, relay_count, first_run, ntp servers)
+- [x] B7 Device + Trigger cJSON serialise/deserialise; `save_devices/load_devices/save_triggers/load_triggers` (config_storage.cpp)
+- [x] B8 `TimeManager::set_time(struct tm)` writes DS1307 + system time (used by wizard / Screen 3b / NTP)
+
+**Block C — engine completion:**
+- [x] C9 `solar/solar_calc.cpp`: NOAA algorithm; scheduler invokes daily at local midnight + on lat/lon change
+- [x] C10 `validators/trigger_validator.cpp`: 10 cross-checks (§6.4.1); warning list per trigger id (moved out of triggers component to avoid storage circular dep)
+- [x] C11 `history/history_log.cpp`: SPIFFS append-only circular ~96 KB primary + .bak rotation; BOOT + I2C fault events wired
+
+**Block D — network (Phase 5 brought forward):**
+- [x] D12 `wifi/wifi_manager.cpp`: station + AP fallback + random 8-char AP password in NVS
+- [x] D12+ `wifi/wifi_manager.h/.cpp`: `scan_networks_blocking(max_count, timeout_ms)` — blocking scan called from a background task; saves/restores WiFi mode; returns `std::vector<ScanResult>` sorted by descending RSSI. Used by wizard SSID scan button.
+- [x] D13 `rtc/ntp_sync.cpp`: SNTP → `TimeManager::set_time`
+- [x] D14 `mqtt_aqua/mqtt_client_aqua.cpp`: HA discovery + state publish + command subscribe + auto-reconnect (folder renamed from `mqtt/` to avoid collision with IDF mqtt component)
+
+**Block E — polish:**
+- [x] E15 Serial-log ring buffer (`logger/log_ring.cpp`: 50-line tee via `esp_log_set_vprintf`, snapshot/clear API)
+- [x] E16 Chip-info accessor (`logger/chip_info.cpp`: model/rev/cores/flash/PSRAM/heap/IDF/app-desc/sha256)
+- [x] E17 i18n table (EN/RU full common-vocabulary, ~80 keys, compile-time table-size check)
+
+**Each block ends with:** `idf.py build` clean + hardware smoke test where applicable.
+
+> **✅ Phase 3.5 complete (May 19, 2026).** All blocks A1–E17 built clean and hardware-verified on COM3. Boot log shows: log-ring tee active before any logging, SystemConfig defaults applied, SPIFFS auto-formatted on first boot, all 5 expected I2C devices present (ambient SHT30 correctly absent), DS1307 seeded TimeManager, sensor sampler caching water T/RH every 5 s, scheduler running fast=10s/full=30s, solar calc producing sunrise/sunset at default coordinates, faults=0. Network modules (wifi/rtc/mqtt_aqua) compiled in but inert — they wait for Phase 4 first-run wizard to supply credentials. One known cosmetic item: status line reports `idle=UINT64_MAX ms` when no touch event has ever occurred — clamp in Phase 4 UI polish.
 
 ### Phase 4 — Full UI
 **Goal:** Complete touch-driven settings interface.
 
-- [ ] `ui/screen_manager.cpp`: Screen stack
-- [ ] `ui/first_run_wizard.cpp`: Multi-step first-run wizard (Screen 0)
-- [ ] `ui/dashboard.cpp`: Real device states + override badges + sensor timestamps
-- [ ] `ui/override_dialog.cpp`: Bottom-sheet override options dialog
-- [ ] `ui/i18n.cpp`: EN/RU translation strings
-- [ ] All settings screens (3a–3f) including drum-roller numeric inputs
-- [ ] Device & trigger config screens with full CRUD + inline validation warnings
-- [ ] Inactivity dim + fault alert banner + validation warning banner
+#### Slice 1 — Dashboard skeleton + screen manager ✅ COMPLETE (May 19, 2026)
+- [x] `ui/screen_manager.cpp`: screen stack with `Transition::NONE/FADE` swap
+- [x] `ui/dashboard.cpp`: full dashboard — header (date/time, WiFi, MQTT), fault banner, sensor row (water T/RH, ambient, solar sunrise/sunset), device grid with per-card state + override badges, network/faults refresh, throttled label updates (`label_set_if_changed`)
+- [x] `ui/ui_context.cpp`: cross-component dependency injection
+- [x] `ui/dim_manager.cpp`: inactivity dim (80% → 15% after 120 s)
+- [x] Touch event dispatch from GT911 polling task into LVGL input device (Core 0 → LVGL queue)
+
+#### Slice 1.5 — Display & font polish ✅ COMPLETE (May 19, 2026)
+- [x] **RGB tearing investigation:** tried `num_fbs=2 + avoid_tearing` (PSRAM-DMA contention noise on touch) → reverted to single FB + bounce-buffer mode (validated config)
+- [x] **LCD timing tuned:** pclk 15 → 12 MHz, bounce buffer 20 → 40 lines (64 KB internal SRAM) — eliminates DMA FIFO underrun ("content shifts on touch") and dashboard flicker
+- [x] **Boot→dashboard transition:** `Transition::FADE` → `Transition::NONE` (single-frame swap; bounce mode can't sustain full-screen fade overdraw)
+- [x] **Modern design system:** new "deep-water aquatech" palette (slate-100 on navy with cyan-400 accents), card recipe with `RADIUS_LG` + hairline outline + subtle shadow + pressed state. Documented in `/memories/repo/aquacontrol-ui-design-system.md`.
+- [x] **Roboto fonts (14/18/24/32) with Cyrillic + FA icons:** generated via `lv_font_conv` 1.5.3; ranges: ASCII + Latin-1 (`°`, `±`) + Cyrillic (U+0400–U+04FF) + FontAwesome solid subset matching `LV_SYMBOL_*` macros. Build flag `LV_LVGL_H_INCLUDE_SIMPLE` set on the `ui` component so `lv_font_conv`'s `#include "lvgl/lvgl.h"` resolves.
+- [x] **Iconography:** WiFi, upload (MQTT), warning (faults), up/down (sunrise/sunset), power (relay/RGB state), pause (HOLD), bell (timed override) — all via `LV_SYMBOL_*` (no PNG pipeline).
+- [x] **Display driver invariants captured in repo memory** (`aquacontrol-board-quirks.md`).
+- Final binary: 930 KB / 3 MB partition (70% free); hardware-verified clean boot, stable touch, no flicker.
+
+#### Slice 1.6 — NVS/RGB cache-race fix ✅ COMPLETE (May 20, 2026)
+- [x] **Root cause identified:** RGB-LCD bounce-buffer EOF ISR `memcpy`s from PSRAM framebuffer (read requires cache); SPI flash erase/program disables cache for the full op → CacheError (EXCCAUSE 0x7) in interrupt context whenever NVS writes overlapped LCD refresh.
+- [x] **JEDEC ID confirmed via esptool:** board ships Zbit ZB25VQ32 (`0x5E4016`). ESP-IDF v5.5.4 has no driver for vendor 0x5E → falls back to generic driver → generic refuses to advertise `SPI_FLASH_CHIP_CAP_SUSPEND` → naive `CONFIG_SPI_FLASH_AUTO_SUSPEND=y` panics at flash init.
+- [x] **Custom chip driver shipped:** `components/flash_chip_zbit/` — probe on vendor 0x5E, whitelist 0x5E4016 for SUSPEND, Winbond-equivalent suspend command config per ZB25VQ32 datasheet (0x75 suspend, 0x7A resume, SUS=SR2[7] via 0x35). All other ops inherit from `spi_flash_chip_generic_*`. Registered via project-local `default_registered_chips[]`.
+- [x] **sdkconfig.defaults:** `CONFIG_SPI_FLASH_OVERRIDE_CHIP_DRIVER_LIST=y` + `CONFIG_SPI_FLASH_AUTO_SUSPEND=y` (required deleting and regenerating sdkconfig — old `is not set` entries override new defaults).
+- [x] **Verified on hardware:** boot log shows `spi_flash: detected chip: zbit` + `Flash suspend feature is enabled`; `load_devices` and `Boot complete` reached without CacheError.
+- [x] **screen_manager + device_detail_screen** rewrites kept: deferred pop via `lv_async_call`, per-widget ActionCtx, save_timer debounce (good engineering even though they were not the actual fix).
+- [x] **Repo memory updated:** `aquacontrol-board-quirks.md` cache-race section marked RESOLVED with Zbit driver + datasheet + sdkconfig stickiness gotcha documented.
+
+#### Remaining Phase 4 slices (not started)
+- [x] **Slice 2 — Override dialog:** `ui/override_dialog.cpp` bottom-sheet modal (Until next change / Timed 1·2·4·8 h / Indefinite / Cancel); wire from dashboard card tap
+  > **Note (2026-05):** Implemented inline in `device_detail_screen.cpp` as a full device-settings screen rather than a bottom-sheet modal. No separate `override_dialog.cpp` exists. Functionality is complete. Status: done (different implementation path).
+  > **Fade status display (2026-05):** `device_detail_screen` `refresh()` timer now shows **FADING IN** (accent colour) / **FADING OUT** (secondary colour) in `lbl_state_big` for PWM devices while `PwmDevice::fade_status()` != IDLE; falls back to ON/OFF when idle.
+- [ ] **Slice 3 — Settings screens:** `ui/settings/settings_menu.cpp` + general/device/trigger/system_status subscreens (CRUD via drum-roller)
+- [x] **Slice 4 — First-run wizard:** `ui/wizard.cpp` single-screen wizard (step counter replaces push/pop navigation); gated by NVS `first_run` flag. Layout: fixed-pixel header (48 px) + scrollable content (360 px) + nav bar (72 px) = 480 px — avoids invalid `LV_PCT(100) - N` arithmetic. Back button hidden on step 0, visible on steps 1–3. Skip button on WiFi step only. Step-dot indicators. Keyboard persists as overlay child of root across step transitions. Scan button on WiFi step triggers background `xTaskCreate` → `lv_async_call` result callback. State freed only on root `LV_EVENT_DELETE` (not on step navigation). Completes by calling `screen_manager::pop(FADE)` and writing WiFi + `SystemConfig` to NVS.
+- [ ] **Slice 5 — i18n EN/RU:** verify all dashboard/settings strings render Cyrillic correctly; add language switcher in general settings
+- [ ] **Slice 6 — Drum-roller numeric input widget:** reusable scroll-wheel picker for times, brightness, temperatures
+- [ ] **Slice 7 — Validation warning banner:** show top-of-screen banner when `trigger_validator` reports cross-check failures (already computed in backend)
+- [ ] **Slice 8 — WiFi/MQTT status hooks:** connect dashboard `lbl_net_wifi`/`lbl_net_mqtt` to real `wifi_manager` + `mqtt_aqua` state changes (currently shows `-` placeholder)
+- [ ] **Slice 9 — Polish:** clamp `idle=UINT64_MAX ms` cosmetic bug; restyle boot_screen with new card recipe; final font subset trim if size matters
 - [ ] **Deliverable:** Complete UI, all settings configurable via touch; first-run wizard guides new user
 
-### Phase 5 — WiFi, NTP, MQTT
+### Phase 5 — WiFi, NTP, MQTT (backend complete via Phase 3.5 Block D; UI pending)
 **Goal:** Connect to network, sync time, publish to HomeAssistant.
 
-- [ ] `wifi/wifi_manager.cpp`: Station + AP fallback
-- [ ] `rtc/ntp_sync.cpp`: SNTP sync → DS1307 update
-- [ ] `wifi/mqtt_client.cpp`: HA discovery + state publish + command subscribe
-- [ ] WiFi settings UI integration
-- [ ] **Deliverable:** HA sees all devices, controls work from HA
+- [x] `wifi/wifi_manager.cpp`: Station + AP fallback (with random 8-char AP password in NVS) — done in Phase 3.5 D12
+- [x] `rtc/ntp_sync.cpp`: SNTP sync → `TimeManager::set_time` → DS1307 — done in Phase 3.5 D13
+- [x] `mqtt_aqua/mqtt_client_aqua.cpp`: HA discovery + state publish + command subscribe + auto-reconnect — done in Phase 3.5 D14 (folder renamed from `mqtt/` to avoid collision with IDF mqtt component)
+- [ ] WiFi settings UI integration — pending Phase 4 Slice 4 (first-run wizard) + Slice 8 (status hooks)
+- [ ] **Deliverable:** HA sees all devices, controls work from HA — pending UI to supply credentials (modules are compiled in but inert until then)
 
 ### Phase 6 — OTA + Web Dashboard
 **Goal:** Firmware updates without USB cable.
@@ -1305,3 +1419,88 @@ None. All hardware addresses confirmed — no I2C conflicts:
 ---
 
 *End of Plan v1.2*
+
+---
+
+## Appendix — Developer Design Notes (integrated 2026-05)
+
+The following items were recorded by the developer in `.claude/notes.md` and are queued for implementation in the appropriate phase. They do not block the correction plan gate but should be incorporated before Phase 7 testing.
+
+### DN-1 — Temperature sensor smoothing + threshold deadband for TempTrigger
+
+**Phase**: 4 (add to TempTrigger backend, wire to trigger settings UI)
+
+The `TempTrigger` currently compares raw sensor readings against `high_threshold` / `low_threshold`. Two improvements needed:
+1. **EMA smoothing**: apply an exponential moving average (`alpha ≈ 0.2`) to `current_temp_` inside `TempTrigger::update_temperature()`. The smoothed value is what `evaluate()` compares against thresholds. This prevents rapid on/off cycling from sensor noise.
+2. **Hysteresis deadband**: when temperature crosses the threshold to activate, require it to go `deadband_delta` past the threshold before deactivating. Prevents chatter around the setpoint. The deadband value (default `0.5 °C`) should be configurable per trigger.
+
+```cpp
+// Proposed additions to TempTrigger:
+float ema_temp_    = 0.0f;    // smoothed reading
+float deadband_c_  = 0.5f;    // hysteresis deadband
+```
+
+---
+
+### DN-2 — Solar trigger event-type selector (SUNRISE / SUNSET) in UI
+
+**Phase**: 4, Slice 3 (trigger settings sub-screens)
+
+The `SolarTrigger` data model already has `SolarEvent event` (SUNRISE or SUNSET) and the scheduler correctly populates both `sunrise_min_today` and `sunset_min_today`. However the trigger creation/edit UI currently hard-codes SUNRISE (no selector shown).
+
+**Implementation**: Add a two-option toggle (SUNRISE / SUNSET) to the solar trigger settings screen. Wire to `SolarTrigger::event` field. The toggle style should match the trigger-type pill pattern from `add_device_screen`.
+
+---
+
+### DN-3 — Water heater safety watchdog subsystem
+
+**Phase**: 4 (scheduler integration) + 5 (MQTT alert)
+
+Safety requirement: detect potentially dangerous heater fault conditions and raise an alert / cut power.
+
+**Condition 1 — Heater stuck ON with no temperature response**:
+- If a device linked to a PWM heater trigger has been continuously active for more than `N` minutes (configurable, default 60 min) AND the water temperature has not risen by at least `delta` °C (configurable, default 0.5 °C) over that period, raise a fault.
+- Fault code: `0x0200` — "Heater: no temperature response"
+
+**Condition 2 — Temperature rising with heater OFF**:
+- If no heating device is active AND water temperature is rising more than `rate` °C/min (configurable, default 0.5 °C/min) over a 5-minute rolling window, raise an alert (not a fault — could be external heat source).
+- Fault code: `0x0201` — "Temp: rising without heater"
+
+**Implementation location**: New component `components/safety/heater_watchdog.cpp` with a periodic check called from the scheduler's `pre_eval` hook or as a separate 60-second timer task on Core 0.
+
+---
+
+### DN-4 — RGB fade with HSV interpolation instead of linear RGB lerp
+
+**Phase**: 4 (RgbDevice fade implementation)
+
+Current `RgbDevice::apply()` issues an immediate (or faded via `fade_to()`) step to the target duty cycle. The PCA9685 `fade_to()` linearly interpolates PWM duty (i.e., linear RGB). For smooth colour transitions this produces a visually "muddy" midpoint.
+
+**Improvement**: When fade duration > 0, compute a series of intermediate HSV keyframes and schedule them via a FreeRTOS timer or LVGL async call. The transition stays perceptually smooth through the HSV hue arc rather than the RGB cube diagonal. Also, for simple PWM divice need add a optional gamma correction curve (e.g., `output = input^2.2`) to linear brightness changes. And also add the configurable low limit of power to PWM devices - e.g. fan can't spin below some duty, so we need to start and end at this limit.
+
+**Implementation**: Add `hsv_to_rgb()` and `rgb_to_hsv()` utilities to `components/devices/` (or a new `components/color_utils/`). In `RgbDevice::apply()`, when fading, divide the fade into 8–16 steps, computing intermediate RGB values from HSV lerp and calling `set_pwm()` for each step at `fade_ms / steps` intervals.
+
+---
+
+### DN-5 — Device rename UI
+
+**Phase**: 4, Slice 3 (device settings sub-screen)
+
+The `IDevice::name` field exists, and `storage::save_devices()` persists it. However there is no UI to change the name after the device is created (name is set at `add_device_screen` time only).
+
+**Implementation**: In `device_detail_screen`, add a name text field (or a tappable label that opens a keyboard dialog) near the top of the screen. Wire changes to `dev->name = new_name` and schedule a save via `schedule_save()`. The keyboard can reuse the pattern from any existing text-input screen in the project.
+
+---
+
+### DN-6 — Confirmation dialogs for all destructive operations
+
+**Phase**: 4 (ongoing, add to any screen with destructive actions)
+
+Currently only the device delete action has a confirmation dialog. Other destructive actions that should have confirmation:
+- **Trigger delete**: add a confirmation step matching the device delete pattern
+- **Clear override**: prompt "Cancel manual override?" before clearing
+- **Factory reset** (Phase 4 Settings → System): "This will erase all devices and triggers. Confirm?"
+- **WiFi credentials change** (Settings → Network): "Reconnect to new network?" prompt
+
+Review all `LV_EVENT_CLICKED` handlers that modify or delete persistent data and add a two-button confirm/cancel bottom sheet before the destructive call.
+

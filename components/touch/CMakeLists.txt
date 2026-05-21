@@ -10,4 +10,5 @@ idf_component_register(
         lvgl__lvgl
         logger
         display
+        activity
 )

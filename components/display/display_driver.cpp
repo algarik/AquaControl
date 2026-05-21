@@ -24,8 +24,19 @@ esp_err_t init() {
     esp_lcd_rgb_panel_config_t panel_cfg = {};
     panel_cfg.data_width = 16;             // RGB565
     panel_cfg.bits_per_pixel = 16;
-    panel_cfg.psram_trans_align = 64;
-    panel_cfg.num_fbs = 1;                 // One full PSRAM frame buffer
+    panel_cfg.dma_burst_size = 64;         // Replaces deprecated psram_trans_align
+    panel_cfg.num_fbs = 1;                 // Single FB in PSRAM. Two FBs +
+                                           // avoid_tearing was tried and
+                                           // produced PSRAM-DMA contention
+                                           // (screen-wide noise on touch /
+                                           // dashboard updates) because the
+                                           // panel scans out 30 MB/s from
+                                           // PSRAM continuously. Sticking
+                                           // with the validated config:
+                                           // single FB + bounce buffer in
+                                           // internal SRAM (set via
+                                           // bounce_buffer_size_px below)
+                                           // so DMA reads come from SRAM.
     panel_cfg.bounce_buffer_size_px = AC_LCD_BOUNCE_PX;
     panel_cfg.clk_src = LCD_CLK_SRC_DEFAULT;
     panel_cfg.disp_gpio_num = GPIO_NUM_NC;
@@ -71,6 +82,19 @@ esp_err_t init() {
     if (err != ESP_OK) {
         AC_LOGE(TAG, "panel_init failed: %s", esp_err_to_name(err));
         return err;
+    }
+
+    // Zero the framebuffer at boot — otherwise the panel scans out random
+    // PSRAM contents (visible as coloured noise) until LVGL paints.
+    {
+        const size_t fb_bytes = (size_t)AC_LCD_H_RES * AC_LCD_V_RES * 2;
+        void* fb0 = nullptr;
+        if (esp_lcd_rgb_panel_get_frame_buffer(s_panel, 1, &fb0) == ESP_OK && fb0) {
+            memset(fb0, 0, fb_bytes);
+            AC_LOGI(TAG, "Frame buffer cleared (%u bytes)", (unsigned)fb_bytes);
+        } else {
+            AC_LOGW(TAG, "Could not query frame buffer to clear it");
+        }
     }
 
     AC_LOGI(TAG, "RGB panel ready");

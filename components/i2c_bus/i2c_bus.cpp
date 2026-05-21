@@ -107,9 +107,39 @@ esp_err_t I2CBus::transmit_receive(i2c_master_dev_handle_t dev,
 
 esp_err_t I2CBus::probe(uint8_t addr, int timeout_ms) {
     if (bus_ == nullptr) return ESP_ERR_INVALID_STATE;
-    if (!lock(timeout_ms)) return ESP_ERR_TIMEOUT;
+    // Decouple mutex-wait from I2C transfer timeout.  Any concurrent
+    // transaction (LVGL touch poll, sensor read) holds the mutex for only
+    // a few ms; waiting up to 300 ms avoids false "probe failed" reports
+    // due to transient bus contention.  The actual i2c_master_probe() call
+    // still uses the caller-supplied timeout so real device faults are
+    // detected quickly.
+    const int mutex_wait_ms = (timeout_ms >= 300) ? timeout_ms : 300;
+    if (!lock(mutex_wait_ms)) return ESP_ERR_TIMEOUT;
     esp_err_t err = i2c_master_probe(bus_, addr, timeout_ms);
     unlock();
+    return err;
+}
+
+esp_err_t I2CBus::reset(int timeout_ms) {
+    // H6: Reset the I2C peripheral state machine. This unsticks any
+    // operation that failed mid-transfer (e.g., device disconnected).
+    // Device handles registered via add_device() remain valid after reset.
+    if (bus_ == nullptr) return ESP_ERR_INVALID_STATE;
+    if (!lock(timeout_ms)) {
+        AC_LOGW(TAG, "reset: bus mutex timeout — forcing hardware reset");
+        // Even if we couldn't take the mutex, attempt the reset so the
+        // hardware recovers. The mutex state may be corrupted but the
+        // watchdog has a higher priority than normal I2C users.
+        esp_err_t err = i2c_master_bus_reset(bus_);
+        return err;
+    }
+    esp_err_t err = i2c_master_bus_reset(bus_);
+    unlock();
+    if (err != ESP_OK) {
+        AC_LOGE(TAG, "bus reset failed: %s", esp_err_to_name(err));
+    } else {
+        AC_LOGW(TAG, "I2C bus reset OK");
+    }
     return err;
 }
 

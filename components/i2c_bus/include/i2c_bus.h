@@ -46,6 +46,11 @@ public:
     // Probe: returns ESP_OK if the device responds, ESP_ERR_NOT_FOUND otherwise.
     esp_err_t probe(uint8_t addr, int timeout_ms = 20);
 
+    // H6: Attempt an I2C bus reset to recover from a stuck peripheral.
+    // Safe to call from any task; acquires the bus mutex so in-flight
+    // transactions complete (or time out) first.
+    esp_err_t reset(int timeout_ms = 200);
+
     i2c_master_bus_handle_t handle() const { return bus_; }
     bool initialized() const { return bus_ != nullptr; }
 

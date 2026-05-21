@@ -1,0 +1,9 @@
+idf_component_register(
+    SRCS
+        "faults.cpp"
+    INCLUDE_DIRS
+        "include"
+    REQUIRES
+        logger
+        esp_timer
+)

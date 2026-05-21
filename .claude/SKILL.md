@@ -640,6 +640,48 @@ device (PCF8575, PCA9685) triggers the critical fault screen.
 
 ## 8. Debugging Techniques
 
+### Copy-Pasteable Diagnostic Dumps (`AC_DUMP_*`)
+
+**Convention:** any time we add code that exposes important runtime state
+(boot summary, scan results, sensor reads, fault transitions, network status,
+…), also mirror that state into a `AC_DUMP` block so the user can copy the
+block from the serial monitor and paste it back into chat for diagnosis.
+
+Header: `components/logger/include/ac_debug_dump.h`  
+Gate:   `AC_DEBUG_DUMP_ENABLED` in `main/app_config.h`
+        (default `1` during development; set to `0` for the release build —
+        every macro then compiles to a no-op).
+
+Block format (always wrapped in greppable markers, prefixed lines):
+
+```cpp
+AC_DUMP_BEGIN("boot-summary");
+AC_DUMP("Firmware:   %s v%s", AC_FIRMWARE_NAME, AC_FIRMWARE_VERSION);
+AC_DUMP("Free heap:  %lu", esp_get_free_heap_size());
+AC_DUMP_END("boot-summary");
+```
+
+renders to:
+
+```
+===== AC-DUMP BEGIN: boot-summary =====
+  Firmware:   AquaControl v0.1.0
+  Free heap:  256432
+===== AC-DUMP END:   boot-summary =====
+```
+
+**When to emit a dump:**
+- Boot summary at the end of `app_main` (already done).
+- I2C watchdog fault/recovery transitions (already done).
+- Any new "state change worth telling the user about" (NVS load result,
+  WiFi state changes, OTA progress, scheduler tick decisions during
+  bring-up, etc.).
+- One-shot diagnostic CLI commands (e.g. `scan`, `status`).
+
+**Do NOT emit a dump on a hot path** — they bypass log levels and always
+print. Use them for once-per-boot or once-per-event state, not for the
+10 Hz scheduler tick.
+
 ### Serial Monitor (Primary Debugging Tool)
 
 ```powershell

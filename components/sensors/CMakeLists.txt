@@ -1,0 +1,13 @@
+idf_component_register(
+    SRCS
+        "sensor_sampler.cpp"
+    INCLUDE_DIRS
+        "include"
+    REQUIRES
+        drivers
+        faults
+        i2c_bus
+        logger
+        freertos
+        esp_timer
+)

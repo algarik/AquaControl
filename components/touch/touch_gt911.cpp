@@ -1,20 +1,41 @@
 #include "touch_gt911.h"
 
 #include "ac_logger.h"
+#include "activity.h"
 #include "app_config.h"
 #include "esp_lcd_panel_io.h"
 #include "esp_lcd_touch_gt911.h"
 #include "esp_lvgl_port.h"
+#include "lvgl.h"
 #include "lvgl_port.h"
 
 namespace aqua::touch {
 
 static const char* TAG = "TouchGT911";
+static uint8_t s_detected_addr = 0;
+
+uint8_t detected_address() { return s_detected_addr; }
 
 esp_err_t init(aqua::i2c::I2CBus& bus) {
     if (!bus.initialized()) {
         AC_LOGE(TAG, "I2C bus not initialized");
         return ESP_ERR_INVALID_STATE;
+    }
+
+    // Probe both possible GT911 addresses. The chip's I2C address (0x14 or
+    // 0x5D) is selected by the INT pin level during reset; with INT/RST
+    // unconnected we don't control it, so we have to discover it.
+    const uint8_t candidates[] = { AC_ADDR_GT911_PRIMARY, AC_ADDR_GT911_ALT };
+    uint8_t addr = 0;
+    for (uint8_t a : candidates) {
+        esp_err_t p = bus.probe(a, 50);
+        AC_LOGI(TAG, "probe 0x%02X -> %s", a, esp_err_to_name(p));
+        if (p == ESP_OK) { addr = a; break; }
+    }
+    if (addr == 0) {
+        AC_LOGE(TAG, "GT911 not responding at 0x%02X or 0x%02X",
+                AC_ADDR_GT911_PRIMARY, AC_ADDR_GT911_ALT);
+        return ESP_ERR_NOT_FOUND;
     }
 
     // 1. Create the I2C panel-IO handle wrapping the shared bus.
@@ -23,7 +44,7 @@ esp_err_t init(aqua::i2c::I2CBus& bus) {
     //    declaration in IDF 5.5+, which is an error in C++.
     esp_lcd_panel_io_handle_t io_handle = nullptr;
     esp_lcd_panel_io_i2c_config_t io_cfg = {};
-    io_cfg.dev_addr = AC_ADDR_GT911;
+    io_cfg.dev_addr = addr;
     io_cfg.control_phase_bytes = 1;
     io_cfg.dc_bit_offset = 0;
     io_cfg.lcd_cmd_bits = 16;
@@ -60,13 +81,27 @@ esp_err_t init(aqua::i2c::I2CBus& bus) {
     const lvgl_port_touch_cfg_t lvgl_touch_cfg = {
         .disp = aqua::display::lvgl_display(),
         .handle = touch_handle,
+        .scale = {},
     };
-    if (lvgl_port_add_touch(&lvgl_touch_cfg) == nullptr) {
+    lv_indev_t* indev = lvgl_port_add_touch(&lvgl_touch_cfg);
+    if (indev == nullptr) {
         AC_LOGE(TAG, "lvgl_port_add_touch failed");
         return ESP_FAIL;
     }
 
-    AC_LOGI(TAG, "GT911 initialized at 0x%02X (polling mode)", AC_ADDR_GT911);
+    // Bridge LVGL press events into the activity tracker.
+    lv_indev_add_event_cb(indev,
+        [](lv_event_t* e) {
+            lv_event_code_t code = lv_event_get_code(e);
+            if (code == LV_EVENT_PRESSED || code == LV_EVENT_PRESSING ||
+                code == LV_EVENT_RELEASED) {
+                aqua::activity::notify();
+            }
+        },
+        LV_EVENT_ALL, nullptr);
+
+    s_detected_addr = addr;
+    AC_LOGI(TAG, "GT911 initialized at 0x%02X (polling mode)", addr);
     return ESP_OK;
 }
 

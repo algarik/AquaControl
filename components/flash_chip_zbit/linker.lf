@@ -1,0 +1,5 @@
+[mapping:flash_chip_zbit]
+archive: libflash_chip_zbit.a
+entries:
+    spi_flash_chip_zbit (noflash)
+    chip_drivers        (noflash)

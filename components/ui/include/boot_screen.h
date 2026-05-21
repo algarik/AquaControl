@@ -1,16 +1,20 @@
 // AquaControl — Boot console screen
-// Phase 1: shows a fake Linux-style boot log so we can validate the
-// display + LVGL stack. Phase 2 will hook real I2C scan results in.
 #pragma once
+
+#include <cstdint>
 
 namespace aqua::ui {
 
-// Build and show the boot screen. Must be called from inside lvgl_port_lock(),
-// OR from the LVGL task itself. We provide a thread-safe wrapper.
+// Build and show the boot screen (thread-safe).
 void boot_screen_show();
 
 // Append a single line to the boot console (thread-safe).
 // Marker is one of: "OK", "FAIL", "..." or nullptr for plain text.
 void boot_screen_log(const char* line, const char* marker = nullptr);
+
+// Called when boot is complete.  Waits for any active pause to be released,
+// then holds the boot log visible for hold_ms milliseconds before returning.
+// The caller then performs the screen transition to the dashboard.
+void boot_screen_finish(uint32_t hold_ms = 2000);
 
 }  // namespace aqua::ui

@@ -6,7 +6,22 @@ idf_component_register(
     REQUIRES
         logger
         i2c_bus
+        drivers
         display
         touch
         ui
+        storage
+        time_mgr
+        devices
+        triggers
+        scheduler
+        sensors
+        activity
+        faults
+        solar
+        validators
+        history
+        wifi
+        rtc
+        mqtt_aqua
 )

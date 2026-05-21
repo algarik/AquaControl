@@ -36,3 +36,14 @@ wifi_credentials.h
 coredump.bin
 coredump_b64.txt
 *.coredump
+
+# Temporary files
+/tmp/
+
+# Build log capture files (ad-hoc terminal output, not source)
+build_log.txt
+build_out*.txt
+build_output*.txt
+build_full_out.txt
+boot_log.txt
+build.log

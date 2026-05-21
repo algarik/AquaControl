@@ -12,6 +12,32 @@
 #define AC_FIRMWARE_VERSION "0.1.0"
 
 // -----------------------------------------------------------------------------
+// Debug / diagnostics
+// -----------------------------------------------------------------------------
+// When non-zero, key state (boot summary, I2C scan, sensor reads, fault
+// transitions) is also printed as a clearly-delimited block to the serial
+// monitor so it can be copy-pasted into a bug report.
+// Set to 0 for release builds (default). Override via build flag:
+//   idf.py build -DEXTRA_CXXFLAGS="-DAC_DEBUG_DUMP_ENABLED=1"
+#ifndef AC_DEBUG_DUMP_ENABLED
+#define AC_DEBUG_DUMP_ENABLED 0
+#endif
+
+// When non-zero, verbose boot-time diagnostics are printed to UART:
+//   - per-device I2C scan results
+//   - driver smoke-test sensor readings (T/RH at startup)
+//   - RTC raw time register read
+//   - TimeManager seeded-from-RTC timestamp
+//   - sensor sampler first-sample readings
+// These are useful during bringup and hardware debugging but add ~15 lines
+// per boot and are not needed in production. Set to 0 for release (default).
+// Override via build flag:
+//   idf.py build -DEXTRA_CXXFLAGS="-DAC_VERBOSE_BOOT=1"
+#ifndef AC_VERBOSE_BOOT
+#define AC_VERBOSE_BOOT 0
+#endif
+
+// -----------------------------------------------------------------------------
 // I2C bus (shared: GT911 touch + all external modules)
 // -----------------------------------------------------------------------------
 #define AC_I2C_PORT        I2C_NUM_0
@@ -20,7 +46,12 @@
 #define AC_I2C_FREQ_HZ     400000
 
 // I2C device addresses (7-bit)
-#define AC_ADDR_GT911         0x14   // Capacitive touch (INT unconnected → polling)
+// GT911 has two possible I2C addresses (0x14 or 0x5D) selected by the INT pin
+// level at reset. On this board INT/RST are unconnected, so the chip powers up
+// at its factory default — usually 0x5D, but some panels ship pre-programmed
+// to 0x14. Touch init probes both.
+#define AC_ADDR_GT911_PRIMARY   0x5D
+#define AC_ADDR_GT911_ALT       0x14
 #define AC_ADDR_PCF8575       0x20   // 16-bit GPIO expander (relays)
 #define AC_ADDR_PCA9685       0x40   // 16-ch PWM (PWM + RGB)
 #define AC_ADDR_PCA9685_ALL   0x70   // PCA9685 all-call (always responds; NOT a separate device)
@@ -34,7 +65,11 @@
 // -----------------------------------------------------------------------------
 #define AC_LCD_H_RES        800
 #define AC_LCD_V_RES        480
-#define AC_LCD_PIXEL_CLOCK_HZ  (15 * 1000 * 1000)   // 15 MHz — validated safe
+#define AC_LCD_PIXEL_CLOCK_HZ  (12 * 1000 * 1000)   // 12 MHz - lowered from 15 MHz
+                                                    // to eliminate LCD DMA FIFO
+                                                    // underrun on touch/render
+                                                    // (visible as horizontal pixel
+                                                    // shift + flicker).
 
 // Sync timings (porch / pulse-width in pixels / lines)
 #define AC_LCD_HSYNC_FRONT_PORCH  8
@@ -71,5 +106,9 @@
 // LVGL bounce buffer geometry
 // (See implementation_plan.md §4 / SKILL.md §6 — bounce buffer mode)
 // -----------------------------------------------------------------------------
-#define AC_LCD_BOUNCE_LINES   20                              // lines per bounce buffer
+#define AC_LCD_BOUNCE_LINES   40                              // lines per bounce buffer
+                                                              // (40×800×2 = 64 KB internal
+                                                              // SRAM) — enough headroom
+                                                              // to absorb CPU PSRAM
+                                                              // bursts during LVGL render.
 #define AC_LCD_BOUNCE_PX      (AC_LCD_H_RES * AC_LCD_BOUNCE_LINES)

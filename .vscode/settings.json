@@ -1,3 +1,7 @@
 {
-    "idf.currentSetup": "D:\\espidf\\v5.5.4\\esp-idf"
+    "idf.currentSetup": "D:\\espidf\\v5.5.4\\esp-idf",
+    "idf.portWin": "COM3",
+    "idf.openOcdConfigs": [
+        "board/esp32s3-builtin.cfg"
+    ]
 }

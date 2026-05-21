@@ -10,7 +10,10 @@ CONFIG_IDF_TARGET="esp32s3"
 # Flash & partition table
 # -----------------------------------------------------------------------------
 CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
-CONFIG_ESPTOOLPY_FLASHMODE_QIO=y
+# Flash MUST be DIO when octal PSRAM is enabled — QIO/QOUT pins conflict with
+# the PSRAM D4..D7 lines on ESP32-S3-WROOM-1-N4R8. Forcing QIO here causes the
+# 2nd-stage bootloader to hang silently right after `entry 0x403c8948`.
+CONFIG_ESPTOOLPY_FLASHMODE_DIO=y
 CONFIG_ESPTOOLPY_FLASHFREQ_80M=y
 CONFIG_PARTITION_TABLE_CUSTOM=y
 CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
@@ -22,8 +25,12 @@ CONFIG_PARTITION_TABLE_OFFSET=0x8000
 CONFIG_SPIRAM=y
 CONFIG_SPIRAM_MODE_OCT=y
 CONFIG_SPIRAM_SPEED_80M=y
+CONFIG_SPIRAM_USE_CAPS_ALLOC=y
 CONFIG_SPIRAM_USE_MALLOC=y
 CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y
+# If PSRAM init fails, continue boot instead of hanging silently in the
+# bootloader (lets us see the failure in logs and degrade gracefully).
+CONFIG_SPIRAM_IGNORE_NOTFOUND=y
 # Allocations <= 16KB go to internal SRAM (faster, DMA-capable)
 CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=16384
 CONFIG_SPIRAM_MALLOC_RESERVE_INTERNAL=32768
@@ -36,9 +43,14 @@ CONFIG_COMPILER_CXX_RTTI=n
 CONFIG_COMPILER_OPTIMIZATION_PERF=y
 
 # -----------------------------------------------------------------------------
-# Console — ESP32-S3 built-in USB Serial/JTAG on the USB-C connector
+# Console — primary on UART0 (CH340 USB-Serial bridge, COMx port on Windows),
+# mirrored to the native ESP32-S3 USB-Serial-JTAG. Single-output USB-JTAG-only
+# (`CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y`) breaks `idf.py monitor` when you are
+# connected to the CH340 side — you only see the ROM banner and the 2nd-stage
+# bootloader appears to hang because its output goes to a different port.
 # -----------------------------------------------------------------------------
-CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
+CONFIG_ESP_CONSOLE_UART_DEFAULT=y
+CONFIG_ESP_CONSOLE_SECONDARY_USB_SERIAL_JTAG=y
 
 # -----------------------------------------------------------------------------
 # FreeRTOS — both cores enabled (S3 is dual-core)
@@ -52,6 +64,22 @@ CONFIG_FREERTOS_HZ=1000
 CONFIG_ESP_TASK_WDT_PANIC=y
 CONFIG_ESP_TASK_WDT_TIMEOUT_S=10
 CONFIG_ESP_INT_WDT=y
+
+# -----------------------------------------------------------------------------
+# FreeRTOS stack overflow detection via hardware watchpoint register (R5)
+# Uses one of the ESP32-S3's four hardware watchpoints to detect stack
+# overflows at the instruction level → clean panic with stack trace instead
+# of silent heap corruption. Zero runtime overhead.
+# -----------------------------------------------------------------------------
+CONFIG_FREERTOS_WATCHPOINT_END_OF_STACK=y
+
+# -----------------------------------------------------------------------------
+# Heap poisoning — light mode (R6)
+# Writes a canary pattern to freed blocks and checks it on free()/malloc().
+# Catches use-after-free bugs at the site of the second access.
+# "Light" adds only ~5% overhead vs "comprehensive" (~30%). Safe for production.
+# -----------------------------------------------------------------------------
+CONFIG_HEAP_POISONING_LIGHT=y
 
 # -----------------------------------------------------------------------------
 # Coredump to UART so we can debug crashes without a hardware debugger
@@ -81,6 +109,48 @@ CONFIG_LV_USE_FONT_COMPRESSED=y
 # Built-in placeholder font (only used until Roboto fonts are generated)
 CONFIG_LV_FONT_MONTSERRAT_14=y
 CONFIG_LV_FONT_MONTSERRAT_18=y
+# Large Montserrat sizes for the dashboard "watch" clock + big sensor values
+CONFIG_LV_FONT_MONTSERRAT_28=y
+CONFIG_LV_FONT_MONTSERRAT_48=y
+
+# -----------------------------------------------------------------------------
+# LVGL widget exclusions — disable everything the project does not use.
+# Used in code (grep lv_*_create): label, button, msgbox, roller, textarea,
+# spinbox, switch, checkbox, keyboard (+ buttonmatrix is pulled in by
+# keyboard automatically). Everything else is dead code and just inflates
+# flash + the per-widget vtable in PSRAM.
+# -----------------------------------------------------------------------------
+CONFIG_LV_USE_ANIMIMG=n
+CONFIG_LV_USE_ARC=n
+CONFIG_LV_USE_ARCLABEL=n
+CONFIG_LV_USE_BAR=n
+CONFIG_LV_USE_CALENDAR=n
+CONFIG_LV_USE_CANVAS=n
+CONFIG_LV_USE_CHART=n
+CONFIG_LV_USE_DROPDOWN=n
+CONFIG_LV_USE_IMAGEBUTTON=n
+CONFIG_LV_USE_LED=n
+CONFIG_LV_USE_LINE=n
+CONFIG_LV_USE_LIST=n
+CONFIG_LV_USE_LOTTIE=n
+CONFIG_LV_USE_MENU=n
+CONFIG_LV_USE_SCALE=n
+CONFIG_LV_USE_SLIDER=n
+CONFIG_LV_USE_SPAN=n
+CONFIG_LV_USE_SPINNER=n
+CONFIG_LV_USE_TABLE=n
+CONFIG_LV_USE_TABVIEW=n
+CONFIG_LV_USE_TILEVIEW=n
+CONFIG_LV_USE_WIN=n
+CONFIG_LV_USE_3DTEXTURE=n
+CONFIG_LV_USE_GLTF=n
+CONFIG_LV_USE_BARCODE=n
+CONFIG_LV_USE_QRCODE=n
+CONFIG_LV_USE_VECTOR_GRAPHIC=n
+# Bidirectional / Arabic shaping — adds runtime cost on every label paint;
+# UI is English/Cyrillic only.
+CONFIG_LV_USE_BIDI=n
+CONFIG_LV_USE_ARABIC_PERSIAN_CHARS=n
 
 # -----------------------------------------------------------------------------
 # esp_lvgl_port — pin LVGL task to Core 1
@@ -88,9 +158,53 @@ CONFIG_LV_FONT_MONTSERRAT_18=y
 # (Configured at runtime via lvgl_port_init() — kept here as a note)
 
 # -----------------------------------------------------------------------------
+# PSRAM XIP — REQUIRED for bounce-buffer + PSRAM-FB RGB LCD mode.
+# Without this the CPU fetches every instruction from flash, which shares the
+# MSPI bus with the octal PSRAM. While the RGB-LCD EOF ISR is doing its
+# memcpy() from the PSRAM frame buffer into the internal-SRAM bounce buffer,
+# the bus contention can delay the swap past the end of the line being
+# scanned out, producing a visible "shift" or partial-redraw artefact.
+# Per the official ESP-IDF docs for the RGB LCD driver, enabling
+# CONFIG_SPIRAM_XIP_FROM_PSRAM (which selects FETCH_INSTRUCTIONS + RODATA)
+# is "highly recommended" for this exact configuration.
+# -----------------------------------------------------------------------------
+CONFIG_SPIRAM_XIP_FROM_PSRAM=y
+CONFIG_SPIRAM_FETCH_INSTRUCTIONS=y
+CONFIG_SPIRAM_RODATA=y
+
+# -----------------------------------------------------------------------------
+# CPU frequency — 240 MHz so the bounce-buffer EOF ISR can complete its
+# ~64 KB PSRAM->SRAM memcpy within one scan-line at pclk=12 MHz. 160 MHz
+# left only marginal headroom and produced the "draws from 2/3 of the
+# horizontal position, then redraws" artefact when other Core 0 work
+# (Wi-Fi, NVS, MQTT) ran concurrently.
+# -----------------------------------------------------------------------------
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
+
+# -----------------------------------------------------------------------------
 # LCD subsystem — enable RGB panel support
 # -----------------------------------------------------------------------------
 CONFIG_LCD_RGB_ISR_IRAM_SAFE=y
+
+# -----------------------------------------------------------------------------
+# SPI flash auto-suspend — REQUIRED to avoid cache-disable races between NVS
+# writes and the RGB-LCD bounce-buffer EOF ISR (the ISR memcpy()s from PSRAM
+# frame buffer; SPI flash erase/program disables cache; without suspend the
+# resulting CacheError panics any flash write that overlaps an LCD refresh).
+#
+# The board's flash is Zbit ZB25VQ32 (JEDEC 0x5E4016, confirmed via
+# `esptool flash_id`). ESP-IDF has no built-in Zbit driver, so it falls
+# back to the "generic" driver, which refuses to advertise suspend. We
+# ship a project-local Zbit driver in components/flash_chip_zbit/ and
+# replace the default chip-driver list via OVERRIDE_CHIP_DRIVER_LIST.
+#
+# Verified opcodes for ZB25VQ32 from project-local datasheet copy at
+# .claude/hw_docs/ZB25VQ32.pdf:
+#   suspend 0x75, resume 0x7A, SUS bit = SR2[7] read via 0x35.
+# These match the Winbond W25Q protocol exactly.
+# -----------------------------------------------------------------------------
+CONFIG_SPI_FLASH_OVERRIDE_CHIP_DRIVER_LIST=y
+CONFIG_SPI_FLASH_AUTO_SUSPEND=y
 
 # -----------------------------------------------------------------------------
 # Logging — INFO during development, lower in production
@@ -98,6 +212,10 @@ CONFIG_LCD_RGB_ISR_IRAM_SAFE=y
 CONFIG_LOG_DEFAULT_LEVEL_INFO=y
 CONFIG_LOG_COLORS=y
 CONFIG_LOG_TIMESTAMP_SOURCE_RTOS=y
+
+# 2nd-stage bootloader at INFO. Bump to VERBOSE temporarily if boot ever
+# regresses to a silent hang (helped diagnose the console-routing bug).
+CONFIG_BOOTLOADER_LOG_LEVEL_INFO=y
 
 # -----------------------------------------------------------------------------
 # Main task stack — keep generous for app_main initialization sequence
