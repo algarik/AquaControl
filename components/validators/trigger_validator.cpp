@@ -9,9 +9,11 @@
 #include "ac_logger.h"
 #include "device_types.h"
 #include "pwm_device.h"
+#include "relay_device.h"
 #include "rgb_device.h"
 #include "schedule_trigger.h"
 #include "solar_trigger.h"
+#include "temp_map_trigger.h"
 #include "temp_trigger.h"
 
 namespace aqua::triggers {
@@ -251,6 +253,33 @@ std::vector<ValidationWarning> TriggerValidator::validate_all(
             }
         }
     }
+
+    // --- TEMP_MAP checks ---------------------------------------------------
+    tm.for_each([&](ITrigger& t) {
+        if (t.get_type() != TriggerType::TEMP_MAP) return;
+        auto& mt = static_cast<TempMapTrigger&>(t);
+
+        // Check #11: invalid temperature range.
+        if (mt.temp_hi_c <= mt.temp_lo_c) {
+            out.push_back({mt.id, 0, 11, WarningSeverity::ERROR_,
+                "temp_hi must be greater than temp_lo — output will always be zero"});
+        }
+        // Check #12: sensor absent.
+        bool present = (mt.sensor_id == 0) ? sensor_water_present : sensor_ambient_present;
+        if (!present) {
+            out.push_back({mt.id, 0, 12, WarningSeverity::WARN,
+                "Sensor not detected — analog output will be zero until sensor is found"});
+        }
+        // Check #13: relay linked to TEMP_MAP — hard error (relays have no analog output;
+        // C-4: relay would be silently frozen, so we reject at save time).
+        for (uint8_t did : mt.linked_device_ids) {
+            IDevice* dev = dm.find(did);
+            if (dev && dev->get_type() == DeviceType::RELAY) {
+                out.push_back({mt.id, did, 13, WarningSeverity::ERROR_,
+                    "TEMP_MAP trigger cannot be linked to a relay device"});
+            }
+        }
+    });
 
     AC_LOGI(TAG, "validate_all: %u warnings", (unsigned)out.size());
     return out;

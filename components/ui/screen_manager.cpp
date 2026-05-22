@@ -9,10 +9,13 @@
 #include "screen_manager.h"
 
 #include <atomic>
+#include <cassert>
 #include <vector>
 
 #include "ac_logger.h"
 #include "esp_lvgl_port.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 
 namespace aqua::ui::screen_manager {
 
@@ -111,6 +114,11 @@ static void pop_to_root_async_cb(void* arg) {
 
 void push(lv_obj_t* new_root, Transition tr) {
     if (new_root == nullptr) return;
+    // M-6: push() acquires the LVGL lock synchronously and must be called from
+    // the LVGL task (Core 1) — from an LVGL event callback or lv_async_call()
+    // callback. Calling it from Core 0 will deadlock because lvgl_port_lock()
+    // is already held by Core 1 during event dispatch.
+    assert(xPortGetCoreID() == 1 && "push() must be called from Core 1 / LVGL task");
     if (!lvgl_port_lock(200)) {
         AC_LOGE(TAG, "push: LVGL lock timeout");
         return;

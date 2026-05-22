@@ -222,3 +222,42 @@ CONFIG_BOOTLOADER_LOG_LEVEL_INFO=y
 # -----------------------------------------------------------------------------
 CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
 CONFIG_ESP_MAIN_TASK_AFFINITY_CPU0=y
+
+# -----------------------------------------------------------------------------
+# P-4: LVGL parallel rendering — enable FreeRTOS OS integration and
+# second draw unit so Core 0 idle time is used for rendering work.
+# LV_OS_FREERTOS is required for DRAW_UNIT_CNT > 1 (mutexes/semas).
+# -----------------------------------------------------------------------------
+CONFIG_LV_OS_FREERTOS=y
+# CONFIG_LV_OS_NONE is not set
+CONFIG_LV_DRAW_SW_DRAW_UNIT_CNT=2
+
+# -----------------------------------------------------------------------------
+# P-5: LVGL rendering cache — 32 KB for glyph/image decode results.
+# Eliminates per-frame re-rasterization of repeated glyphs (clock digits etc).
+# IMAGE_HEADER_CACHE_DEF_CNT=4 covers the project's small image set.
+# -----------------------------------------------------------------------------
+CONFIG_LV_CACHE_DEF_SIZE=32768
+CONFIG_LV_IMAGE_HEADER_CACHE_DEF_CNT=4
+
+# -----------------------------------------------------------------------------
+# P-6: Shadow and circle caches — 8 entries each covers all 7 shadow-using
+# objects plus the 4 distinct rounded-corner radii in the UI.
+# -----------------------------------------------------------------------------
+CONFIG_LV_DRAW_SW_SHADOW_CACHE_SIZE=8
+CONFIG_LV_DRAW_SW_CIRCLE_CACHE_SIZE=8
+
+# -----------------------------------------------------------------------------
+# P-7: Raise PSRAM threshold so LVGL layer buffers (24 KB), glyph cache (32 KB)
+# and all LVGL small allocations stay in fast internal SRAM.
+# Only large structures (widget trees, device/trigger lists) use PSRAM.
+# -----------------------------------------------------------------------------
+CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=65536
+
+# -----------------------------------------------------------------------------
+# P-8: Align draw buffer stride and base to cache-line boundaries.
+# STRIDE_ALIGN=4 pads each row to 4-byte boundary; ALIGN=64 aligns buffer base.
+# Reduces partial cache-line read-modify-writes during sub-region redraws.
+# -----------------------------------------------------------------------------
+CONFIG_LV_DRAW_BUF_STRIDE_ALIGN=4
+CONFIG_LV_DRAW_BUF_ALIGN=64

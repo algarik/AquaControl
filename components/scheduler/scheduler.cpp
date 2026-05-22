@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <cmath>
+#include <cstring>
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -11,6 +12,7 @@
 #include "faults.h"
 #include "mqtt_client_aqua.h"
 #include "sensor_sampler.h"
+#include "time_manager.h"
 
 namespace aqua::scheduler {
 
@@ -20,6 +22,12 @@ static Config           s_cfg{};
 static TaskHandle_t     s_task    = nullptr;
 static std::atomic<bool> s_running{false};
 
+// C-1: Static arrays moved out of run_one_pass() stack to eliminate 768 B of
+// per-invocation stack cost. Safe: scheduler_task is single-threaded.
+static bool    s_desired_active[256];
+static uint8_t s_desired_driver[256];
+static bool    s_analog_only[256];
+
 // ---- Heater safety checker ----------------------------------------
 static void check_heater_safety() {
     if (s_cfg.heater_device_id == 0 || !s_cfg.dm) return;
@@ -27,23 +35,50 @@ static void check_heater_safety() {
     auto* heater = s_cfg.dm->find(s_cfg.heater_device_id);
     if (!heater) return;
 
-    static float     prev_water_c         = -999.f;
-    static uint64_t  heater_on_since_ms   = 0;
-    static uint64_t  last_temp_change_ms  = 0;
+    static float     prev_water_c          = -999.f;
+    static float     heater_off_baseline_c = -999.f;  // water temp captured at heater ON→OFF
+    static uint64_t  heater_on_since_ms    = 0;
+    static uint64_t  heater_off_since_ms   = 0;       // wall-clock ms when heater last went OFF
+    static uint64_t  last_temp_change_ms   = 0;
 
     const uint64_t now_ms = (uint64_t)esp_timer_get_time() / 1000ULL;
     const bool heater_on  = heater->current_active();
     aqua::sensors::Reading water = aqua::sensors::get(aqua::sensors::Role::WATER);
 
+    // Overtemperature protection: raise fault and force heater OFF when water
+    // exceeds the configured ceiling. Runs regardless of heater state so the
+    // fault is also visible when an external source is heating the tank.
+    if (s_cfg.heater_max_temp_c > 0.0f && water.valid) {
+        if (water.temp_c >= s_cfg.heater_max_temp_c) {
+            aqua::faults::raise(0x0302, aqua::faults::Source::SENSOR,
+                                "Heater: water overtemperature");
+            if (heater_on) {
+                heater->set_override(aqua::devices::OverrideMode::INDEFINITE, false, 0);
+                AC_LOGE(TAG, "Heater safety: overtemperature %.1f >= %.1f C — forced OFF",
+                        (double)water.temp_c, (double)s_cfg.heater_max_temp_c);
+            }
+        } else {
+            aqua::faults::clear(0x0302, aqua::faults::Source::SENSOR);
+        }
+    }
+
     if (!heater_on) {
+        // ON→OFF transition: capture water temperature as the baseline for the
+        // unexpected-heat-rise check. Only snapshot once per transition, not
+        // every tick (the old code updated prev_water_c every tick, making the
+        // delta comparison tick-to-tick and effectively never triggering).
+        if (heater_on_since_ms != 0) {
+            heater_off_baseline_c = water.valid ? water.temp_c : -999.f;
+            heater_off_since_ms   = now_ms;
+        }
         heater_on_since_ms = 0;
-        // Check for unexpected temperature rise while heater is confirmed OFF.
-        if (water.valid && prev_water_c > -900.f) {
-            const uint64_t window_ms = 5ULL * 60ULL * 1000ULL;  // 5 min
-            if (water.temp_c - prev_water_c > 2.0f &&
-                now_ms - water.ts_ms < window_ms) {
+        // Check for unexpected temperature rise within 5 min of heater going OFF.
+        if (water.valid && heater_off_baseline_c > -900.f) {
+            const uint64_t window_ms = 5ULL * 60ULL * 1000ULL;
+            if (now_ms - heater_off_since_ms < window_ms &&
+                water.temp_c - heater_off_baseline_c > 2.0f) {
                 aqua::faults::raise(0x0301, aqua::faults::Source::SENSOR,
-                                    "Water: unexpected heat rise");
+                                    "Water: unexpected heat rise after heater off");
             } else {
                 aqua::faults::clear(0x0301, aqua::faults::Source::SENSOR);
             }
@@ -94,22 +129,34 @@ static void run_one_pass(bool full_pass) {
     if (s_cfg.pre_eval) s_cfg.pre_eval(*s_cfg.tm);
 
     // Collect desired states + driver-id keyed by device id.
-    // Use direct-index stack arrays (H2) to avoid heap allocation per tick.
-    // Device IDs are 1..255; index 0 is unused. 256 bytes + 256 bytes = 512 B.
+    // Device IDs are 1..255; index 0 is unused. Arrays are module-level static
+    // (C-1: moved to eliminate 768 B per-invocation stack cost).
     constexpr int kMaxDevId = 256;
-    bool    desired_active[kMaxDevId] = {};
-    uint8_t desired_driver[kMaxDevId] = {};
+    memset(s_desired_active, 0, sizeof(s_desired_active));
+    memset(s_desired_driver, 0, sizeof(s_desired_driver));
+    memset(s_analog_only,    0, sizeof(s_analog_only));
 
-    s_cfg.tm->evaluate_all([&](uint8_t did, bool active, uint8_t drv) {
-        if (did > 0) {
-            desired_active[did] = active;
-            desired_driver[did] = drv;
-        }
-    });
+    // Alias to preserve existing code references below.
+    bool    (&desired_active)[kMaxDevId] = s_desired_active;
+    uint8_t (&desired_driver)[kMaxDevId] = s_desired_driver;
+    bool    (&analog_only)[kMaxDevId]    = s_analog_only;
+
+    s_cfg.tm->evaluate_all(
+        [&](uint8_t did, bool active, uint8_t drv) {
+            if (did > 0) {
+                desired_active[did] = active;
+                desired_driver[did] = drv;
+            }
+        },
+        [&](uint8_t did) {
+            if (did > 0) analog_only[did] = true;
+        });
 
     // Apply to every enabled device. Devices not referenced by any trigger
-    // default to inactive (off).
+    // default to inactive (off).  Devices controlled solely by TEMP_MAP
+    // triggers are skipped here — the post_eval analog pass owns them.
     s_cfg.dm->for_each([&](aqua::devices::IDevice& dev) {
+        if (dev.id < kMaxDevId && analog_only[dev.id]) return;  // analog pass handles this
         bool target  = (dev.id < kMaxDevId) ? desired_active[dev.id] : false;
         uint8_t drv  = (dev.id < kMaxDevId) ? desired_driver[dev.id] : 0;
         bool resolved = dev.resolve_active(target);
@@ -140,6 +187,14 @@ static void run_one_pass(bool full_pass) {
 
     // H1: heater safety check after all device states are resolved.
     check_heater_safety();
+
+    // M-1: NTP staleness fault — only on full passes to avoid per-tick overhead.
+    if (full_pass) {
+        aqua::time_mgr::TimeManager::check_health();
+    }
+
+    // Analog pass: handle TEMP_MAP triggers that bypass the bool pipeline.
+    if (s_cfg.post_eval) s_cfg.post_eval(*s_cfg.tm, *s_cfg.dm);
 }
 
 static void scheduler_task(void* /*arg*/) {
@@ -180,8 +235,10 @@ bool start(const Config& cfg) {
     }
     s_cfg = cfg;
 
+    // C-1: Stack increased from 4096 to 6144 to cover 768 B of static arrays
+    // (now module-level), FreeRTOS per-frame overhead, and solar trig call chain.
     BaseType_t ok = xTaskCreatePinnedToCore(
-        scheduler_task, "ac_sched", 4096, nullptr,
+        scheduler_task, "ac_sched", 6144, nullptr,
         /*priority=*/3, &s_task, /*core=*/0);
     if (ok != pdPASS) {
         AC_LOGE(TAG, "xTaskCreatePinnedToCore failed");

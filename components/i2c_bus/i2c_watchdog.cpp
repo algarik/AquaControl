@@ -84,10 +84,9 @@ void Watchdog::run() {
                 case 2: {
                     AC_LOGE(TAG, "%s @ 0x%02X: 2 consecutive failures — "
                                  "resetting I2C bus (H6)", info.name, info.addr);
-                    // i2c_master_bus_reset() clears the ESP-IDF I2C state
-                    // machine after a stuck/disconnected peripheral without
-                    // invalidating registered device handles.
-                    cfg_.bus->reset(200);
+                    // M-4: use try_reset() to prevent double-reset when sensor_sampler
+                    // detects the same failure concurrently.
+                    cfg_.bus->try_reset(200);
                     break;
                 }
 

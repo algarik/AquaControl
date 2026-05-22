@@ -334,6 +334,31 @@ enum class LangKey : uint16_t {
     TRG_UNIT_HR,             // "hr"
     TRG_ERR_DUR_OVERLAP,     // overlap error label
 
+    // --- Temp-Map trigger specific ----------------------------------------
+    TRG_TMAP_HYSTERESIS,     // "Hysteresis (°C)"
+    TRG_TMAP_TEMP_LO,        // "Temp Lo (°C)"
+    TRG_TMAP_TEMP_HI,        // "Temp Hi (°C)"
+    TRG_TMAP_INFO,           // info text explaining linear mapping
+    TRG_TMAP_RELAY_SKIP,     // note: relay devices excluded from device list
+    TRG_TMAP_REVERSE,        // "Reverse (Hi→Lo)"
+
+    // --- Device detail — RGB / PWM labels ---------------------------------
+    DEV_COLOR_HI,            // "Color Hi  (ON)"
+    DEV_COLOR_LO,            // "Color Lo  (analog min)"
+    DEV_HUE,                 // "H°"
+    DEV_SAT,                 // "Sat"
+    DEV_VAL,                 // "Val"
+    DEV_LEVEL_LO,            // "Level Lo"
+    DEV_LEVEL_LO_HINT,       // hint text below Level Lo in PWM card
+
+    // --- New keys (audit item 21) -----------------------------------------
+    UNIT_RH_PCT,             // humidity sub-label format string (M-2)
+    VAL_TEMPMAP_RELAY_ERROR, // validator error: relay linked to TEMP_MAP (C-4)
+    MSG_SAVED,               // save toast message (UI-4)
+    NTP_FAULT_MSG,           // NTP staleness fault label (M-1)
+
+    DISP_SCREENSAVER,        // "Screensaver clock" toggle label
+
     LANG_KEY_COUNT,  // sentinel — keep LAST
 };
 

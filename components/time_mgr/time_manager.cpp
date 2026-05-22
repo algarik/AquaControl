@@ -4,6 +4,8 @@
 #include <sys/time.h>
 
 #include "ac_logger.h"
+#include "esp_timer.h"
+#include "faults.h"
 #include "solar_calc.h"
 
 namespace aqua::time_mgr {
@@ -13,6 +15,10 @@ static const char* TAG = "TimeMgr";
 aqua::drivers::Ds1307* TimeManager::s_rtc             = nullptr;
 int16_t                TimeManager::s_utc_offset_min  = 0;
 std::atomic<bool>      TimeManager::s_synced{false};
+
+// M-1: track last successful NTP sync for fault surfacing.
+static uint64_t s_last_ntp_sync_ms = 0;
+static bool     s_ever_synced      = false;
 
 void TimeManager::bind_rtc(aqua::drivers::Ds1307* rtc) { s_rtc = rtc; }
 
@@ -92,6 +98,10 @@ bool TimeManager::is_synced() { return s_synced.load(std::memory_order_acquire);
 
 void TimeManager::after_ntp_sync() {
     s_synced.store(true, std::memory_order_release);
+    // M-1: record sync time and clear the NTP-absence fault.
+    s_last_ntp_sync_ms = (uint64_t)esp_timer_get_time() / 1000ULL;
+    s_ever_synced      = true;
+    aqua::faults::clear(0x0500, aqua::faults::Source::SENSOR);
     // SNTP has already called settimeofday() — system clock is correct UTC.
     // We only need to mirror the correct local time into the RTC.
     if (s_rtc && s_rtc->initialized()) {
@@ -107,6 +117,17 @@ void TimeManager::after_ntp_sync() {
             local_tm.tm_hour, local_tm.tm_min, local_tm.tm_sec,
             s_utc_offset_min);
     aqua::solar::request_recalc();
+}
+
+// M-1: raise fault 0x0500 if NTP was once available but hasn't synced in 24 h.
+void TimeManager::check_health() {
+    if (!s_ever_synced) return;
+    const uint64_t age_ms  = (uint64_t)esp_timer_get_time() / 1000ULL - s_last_ntp_sync_ms;
+    const uint64_t kMaxMs  = 24ULL * 3600ULL * 1000ULL;
+    if (age_ms > kMaxMs) {
+        aqua::faults::raise(0x0500, aqua::faults::Source::SENSOR,
+                            "NTP: no sync in 24 h");
+    }
 }
 
 }  // namespace aqua::time_mgr

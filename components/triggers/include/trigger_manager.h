@@ -37,8 +37,12 @@ public:
     // then for every referenced device id emit (device_id, active, driver_id).
     // `driver_id` is the id of the first active trigger that listed the
     // device (0 if `active == false`).
+    // Devices linked exclusively to TEMP_MAP triggers (no bool-pipeline trigger)
+    // are reported via the optional `out_analog_only` callback instead, so the
+    // scheduler knows to skip the bool-pipeline apply() for those devices.
     void evaluate_all(
-        const std::function<void(uint8_t did, bool active, uint8_t driver_id)>& out_active);
+        const std::function<void(uint8_t did, bool active, uint8_t driver_id)>& out_active,
+        const std::function<void(uint8_t did)>& out_analog_only = {});
 
     const std::vector<std::unique_ptr<ITrigger>>& all() const { return triggers_; }
     size_t size() const { return triggers_.size(); }

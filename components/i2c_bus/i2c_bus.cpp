@@ -1,10 +1,15 @@
 #include "i2c_bus.h"
 
+#include <atomic>
+
 #include "ac_logger.h"
 
 namespace aqua::i2c {
 
 static const char* TAG = "I2CBus";
+
+// M-4: Atomic guard to prevent concurrent resets from sensor_sampler and i2c_watchdog.
+static std::atomic<bool> s_reset_in_progress{false};
 
 I2CBus::~I2CBus() {
     if (bus_ != nullptr) {
@@ -141,6 +146,20 @@ esp_err_t I2CBus::reset(int timeout_ms) {
         AC_LOGW(TAG, "I2C bus reset OK");
     }
     return err;
+}
+
+// M-4: Try to reset; returns false without resetting if a reset is already running.
+bool I2CBus::try_reset(int timeout_ms) {
+    bool expected = false;
+    if (!s_reset_in_progress.compare_exchange_strong(
+            expected, true,
+            std::memory_order_acq_rel, std::memory_order_relaxed)) {
+        AC_LOGW(TAG, "try_reset: reset already in progress — skipping");
+        return false;
+    }
+    reset(timeout_ms);
+    s_reset_in_progress.store(false, std::memory_order_release);
+    return true;
 }
 
 }  // namespace aqua::i2c

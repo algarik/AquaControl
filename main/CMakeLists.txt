@@ -24,4 +24,5 @@ idf_component_register(
         wifi
         rtc
         mqtt_aqua
+        web_portal
 )

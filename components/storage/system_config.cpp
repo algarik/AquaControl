@@ -69,12 +69,14 @@ esp_err_t load_system_config(SystemConfig* out) {
     out->ap_password           = get_string          (root, "ap_pw",      out->ap_password.c_str());
     out->heater_device_id      = get_number<uint8_t> (root, "heater_id",  out->heater_device_id);
     out->heater_fault_timeout_s= get_number<uint16_t>(root, "heater_tmo", out->heater_fault_timeout_s);
+    out->heater_max_temp_c     = get_number<float>   (root, "heater_max", out->heater_max_temp_c);
     out->water_sensor_enabled  = get_bool            (root, "w_en",      out->water_sensor_enabled);
     out->ambient_sensor_enabled= get_bool            (root, "a_en",      out->ambient_sensor_enabled);
     out->water_sensor_addr     = get_number<uint8_t> (root, "w_addr",     out->water_sensor_addr);
     out->ambient_sensor_addr   = get_number<uint8_t> (root, "a_addr",     out->ambient_sensor_addr);
     out->water_cal_offset_c    = get_number<float>   (root, "w_cal",      out->water_cal_offset_c);
     out->ambient_cal_offset_c  = get_number<float>   (root, "a_cal",      out->ambient_cal_offset_c);
+    out->screensaver_enabled   = get_bool            (root, "scrn_en",    out->screensaver_enabled);
 
     cJSON_Delete(root);
     AC_LOGI(TAG, "loaded: lat=%.4f lon=%.4f tz=%d lang=%u relays=%u first=%d",
@@ -103,12 +105,14 @@ esp_err_t save_system_config(const SystemConfig& cfg) {
     cJSON_AddStringToObject(root, "ap_pw",      cfg.ap_password.c_str());
     cJSON_AddNumberToObject(root, "heater_id",  cfg.heater_device_id);
     cJSON_AddNumberToObject(root, "heater_tmo", cfg.heater_fault_timeout_s);
+    cJSON_AddNumberToObject(root, "heater_max", cfg.heater_max_temp_c);
     cJSON_AddBoolToObject  (root, "w_en",       cfg.water_sensor_enabled);
     cJSON_AddBoolToObject  (root, "a_en",       cfg.ambient_sensor_enabled);
     cJSON_AddNumberToObject(root, "w_addr",     cfg.water_sensor_addr);
     cJSON_AddNumberToObject(root, "a_addr",     cfg.ambient_sensor_addr);
     cJSON_AddNumberToObject(root, "w_cal",      cfg.water_cal_offset_c);
     cJSON_AddNumberToObject(root, "a_cal",      cfg.ambient_cal_offset_c);
+    cJSON_AddBoolToObject  (root, "scrn_en",    cfg.screensaver_enabled);
 
     char* str = cJSON_PrintUnformatted(root);
     cJSON_Delete(root);

@@ -15,6 +15,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <exception>
 #include <memory>
 
 #include "ac_debug_dump.h"
@@ -55,12 +56,14 @@
 #include "sht3x.h"
 #include "solar_calc.h"
 #include "solar_trigger.h"
+#include "temp_map_trigger.h"
 #include "temp_trigger.h"
 #include "time_manager.h"
 #include "touch_gt911.h"
 #include "trigger_manager.h"
 #include "ui_context.h"
 #include "wifi_manager.h"
+#include "web_portal.h"
 #include "mqtt_client_aqua.h"
 #include "ntp_sync.h"
 #include "i18n.h"
@@ -85,7 +88,18 @@ static void boot_line(const char* msg, bool ok) {
     aqua::ui::boot_screen_log(msg, ok ? "OK" : "FAIL");
 }
 
+// M-5: file-scope spinlock — guards correlated lat/lon/utc_offset_min reads/writes
+// in g_sys_cfg. Declared extern in app_config.h; used by wizard.cpp and pre_eval lambda.
+portMUX_TYPE g_sys_cfg_mux = portMUX_INITIALIZER_UNLOCKED;
+
 extern "C" void app_main(void) {
+    // H-6: Catch any uncaught C++ exception or pure-virtual call and reboot
+    // rather than spinning in an undefined state.
+    std::set_terminate([]() {
+        ESP_LOGE("main", "std::terminate() called — rebooting");
+        esp_restart();
+    });
+
     // Install in-RAM log tee before any other logging happens, so the UI
     // "System Info → Logs" page sees the complete boot trace.
     aqua::log_ring::init();
@@ -107,6 +121,8 @@ extern "C" void app_main(void) {
     // intent explicit and survives any future refactor that does).
     static aqua::storage::SystemConfig g_sys_cfg;
     aqua::storage::load_system_config(&g_sys_cfg);
+    // M-5: g_sys_cfg_mux is defined at file scope (above app_main) so that
+    // wizard.cpp (via extern in app_config.h) can also acquire it.
 
     // Restore saved language to the i18n subsystem before any UI text is set.
     aqua::ui::i18n::set_language(
@@ -202,7 +218,13 @@ extern "C" void app_main(void) {
 
     // 7. Boot console — populate with real scan/init results.
     aqua::ui::boot_screen_show();
-    aqua::ui::boot_screen_log("I2C bus initialized (SDA=19, SCL=20)", "OK");
+    {
+        // H-2: Use GPIO constants rather than literal numbers so the log stays accurate.
+        char i2c_line[64];
+        snprintf(i2c_line, sizeof(i2c_line), "I2C bus initialized (SDA=%d, SCL=%d)",
+                 (int)AC_I2C_SDA_PIN, (int)AC_I2C_SCL_PIN);
+        aqua::ui::boot_screen_log(i2c_line, "OK");
+    }
     aqua::ui::boot_screen_log("Display: 800x480 RGB panel", "OK");
     aqua::ui::boot_screen_log("Backlight: LEDC PWM on GPIO 2", "OK");
     aqua::ui::boot_screen_log("LVGL v9 attached", "OK");
@@ -246,6 +268,10 @@ extern "C" void app_main(void) {
             snprintf(line, sizeof(line), "Sensor: SHT3x water @ 0x%02X",
                      AC_ADDR_SHT30_WATER);
             boot_line(line, false);
+            // Raise a persistent fault so the dashboard banner reflects the
+            // missing sensor even before the sampler task starts raising its own.
+            aqua::faults::raise(0x0010, aqua::faults::Source::SENSOR,
+                                "Water sensor missing at boot");
         }
     }
     {
@@ -375,17 +401,29 @@ extern "C" void app_main(void) {
         aqua::scheduler::Config scfg{};
         scfg.dm = &g_devices;
         scfg.tm = &g_triggers;
-        scfg.pre_eval = [&g_sys_cfg](aqua::triggers::TriggerManager& tm) {
+        scfg.pre_eval = [&g_sys_cfg, &g_sys_cfg_mux](aqua::triggers::TriggerManager& tm) {
             // 1. Push the latest cached sensor readings into every TempTrigger
             //    before the scheduler evaluates them. Triggers whose sensor is
             //    missing from the cache get `sensor_present=false`.
             auto water   = aqua::sensors::get(aqua::sensors::Role::WATER);
             auto ambient = aqua::sensors::get(aqua::sensors::Role::AMBIENT);
+            // Stale reading guard: if the sampler task has stalled (no new
+            // successful read for > 3× the nominal 5 s interval) the cache
+            // still holds valid=true with an arbitrarily old timestamp.
+            // Treat that as invalid so temperature triggers fail safe.
+            static constexpr uint64_t kSensorStaleMs = 15000ULL;  // 3 × 5 s
+            if (water.valid  && aqua::sensors::age_ms(aqua::sensors::Role::WATER)   > kSensorStaleMs) water.valid  = false;
+            if (ambient.valid && aqua::sensors::age_ms(aqua::sensors::Role::AMBIENT) > kSensorStaleMs) ambient.valid = false;
             tm.for_each([&](aqua::triggers::ITrigger& t) {
-                if (t.get_type() != aqua::triggers::TriggerType::TEMP) return;
-                auto& tt = static_cast<aqua::triggers::TempTrigger&>(t);
-                const auto& src = (tt.sensor_id == 1) ? ambient : water;
-                tt.update_temperature(src.temp_c, src.valid);
+                if (t.get_type() == aqua::triggers::TriggerType::TEMP) {
+                    auto& tt = static_cast<aqua::triggers::TempTrigger&>(t);
+                    const auto& src = (tt.sensor_id == 1) ? ambient : water;
+                    tt.update_temperature(src.temp_c, src.valid);
+                } else if (t.get_type() == aqua::triggers::TriggerType::TEMP_MAP) {
+                    auto& mt = static_cast<aqua::triggers::TempMapTrigger&>(t);
+                    const auto& src = (mt.sensor_id == 1) ? ambient : water;
+                    mt.update_temperature(src.temp_c, src.valid);
+                }
             });
 
             // 2. Daily solar recompute: if the local date changed since the
@@ -396,10 +434,18 @@ extern "C" void app_main(void) {
             struct tm now = aqua::time_mgr::TimeManager::now_local();
             if (now.tm_yday != s_last_yday || aqua::solar::consume_recalc()) {
                 s_last_yday = now.tm_yday;
+                // M-5: read correlated lat/lon/utc_offset_min under spinlock to
+                // avoid torn reads if Core 1 (wizard/time_location_screen) writes
+                // them concurrently.
+                taskENTER_CRITICAL(&g_sys_cfg_mux);
+                float  s5_lat = g_sys_cfg.latitude;
+                float  s5_lon = g_sys_cfg.longitude;
+                int    s5_ofs = g_sys_cfg.utc_offset_min;
+                taskEXIT_CRITICAL(&g_sys_cfg_mux);
                 auto dr = aqua::solar::compute(now.tm_year + 1900, now.tm_mon + 1,
                                                now.tm_mday,
-                                               g_sys_cfg.latitude, g_sys_cfg.longitude,
-                                               g_sys_cfg.utc_offset_min);
+                                               s5_lat, s5_lon,
+                                               s5_ofs);
                 tm.for_each([&](aqua::triggers::ITrigger& t) {
                     if (t.get_type() != aqua::triggers::TriggerType::SOLAR) return;
                     auto& st = static_cast<aqua::triggers::SolarTrigger&>(t);
@@ -411,18 +457,45 @@ extern "C" void app_main(void) {
                     AC_LOGI("solar", "today: sunrise=%02d:%02d sunset=%02d:%02d (lat=%.4f lon=%.4f)",
                             dr.sunrise_min / 60, dr.sunrise_min % 60,
                             dr.sunset_min  / 60, dr.sunset_min  % 60,
-                            (double)g_sys_cfg.latitude, (double)g_sys_cfg.longitude);
+                            (double)s5_lat, (double)s5_lon);
                 } else {
                     AC_LOGW("solar", "today: no sunrise/sunset (polar) at lat=%.4f",
-                            (double)g_sys_cfg.latitude);
+                            (double)s5_lat);
                 }
             }
         };
         // M3: event-driven dashboard refresh — Core 0 notifies Core 1 via lv_async_call.
         scfg.on_device_changed = aqua::ui::dashboard::notify_device_changed;
+        // Analog (TEMP_MAP) post-eval pass: apply level to linked PWM/RGB devices.
+        scfg.post_eval = [](aqua::triggers::TriggerManager& tm,
+                            aqua::devices::DeviceManager& dm) {
+            tm.for_each([&](aqua::triggers::ITrigger& t) {
+                if (t.get_type() != aqua::triggers::TriggerType::TEMP_MAP || !t.enabled) return;
+                auto& mt = static_cast<aqua::triggers::TempMapTrigger&>(t);
+                const float level = mt.eval_level();
+                for (uint8_t did : mt.linked_device_ids) {
+                    auto* dev = dm.find(did);
+                    if (!dev) continue;
+                    // C-4: relay devices have no analog output; skip to prevent freeze.
+                    if (dev->get_type() == aqua::devices::DeviceType::RELAY) {
+                        AC_LOGW(TAG, "TEMP_MAP trigger %u linked to relay %u — skipping",
+                                (unsigned)mt.id, (unsigned)did);
+                        continue;
+                    }
+                    bool prev = dev->current_active();
+                    dev->apply_analog(level);
+                    if (dev->current_active() != prev) {
+                        aqua::ui::dashboard::notify_device_changed();
+                        if (aqua::mqtt::connected())
+                            aqua::mqtt::publish_device_state(*dev);
+                    }
+                }
+            });
+        };
         // H1: heater safety — propagate settings from SystemConfig.
         scfg.heater_device_id       = g_sys_cfg.heater_device_id;
         scfg.heater_fault_timeout_s = g_sys_cfg.heater_fault_timeout_s;
+        scfg.heater_max_temp_c      = g_sys_cfg.heater_max_temp_c;
         if (!aqua::scheduler::start(scfg)) {
             AC_LOGE(TAG, "Scheduler failed to start");
         }
@@ -528,6 +601,7 @@ extern "C" void app_main(void) {
         aqua::ntp::start(cfg.ntp1, cfg.ntp2);
         aqua::history::append(aqua::history::EventType::WIFI_CONNECT, 0, 0,
                               aqua::wifi::ip_string().c_str());
+        aqua::web_portal::stop_deferred();  // AP portal no longer needed
         // NOTE: Do NOT call mqtt::start() here. sys_evt stack is ~2.8 kB and
         // esp_mqtt_client_init() will overflow it. MQTT auto-reconnects via
         // its own task if already started. Re-enabling WiFi via the network
@@ -540,6 +614,7 @@ extern "C" void app_main(void) {
             aqua::wifi::start_station(wsc);
         } else {
             aqua::wifi::start_ap_fallback();
+            aqua::web_portal::start({&g_devices});
         }
     } else {
         AC_LOGI("main", "WiFi disabled by user setting — skipping WiFi start");
@@ -576,19 +651,30 @@ extern "C" void app_main(void) {
                     }
                 });
 
-            // B4: HA discovery on each (re)connect.
+            // B4: HA discovery on (re)connect — guarded to avoid a storm.
+            // H-4: re-publish only when the device config has changed or on first connect.
             aqua::mqtt::set_connect_callback([]() {
-                g_devices.for_each([](aqua::devices::IDevice& dev) {
-                    aqua::mqtt::publish_ha_discovery(dev);
-                    // Publish current state immediately so HA doesn't show
-                    // "Unknown" until the next scheduler-driven change.
-                    aqua::mqtt::publish_device_state(dev);
-                });
-                // Sensor discovery: sensor 0 = water, sensor 1 = ambient.
-                aqua::mqtt::publish_ha_sensor_discovery(0, "AquaCtl Water");
-                aqua::mqtt::publish_ha_sensor_discovery(1, "AquaCtl Ambient");
-                // System status sensors (uptime, heap, WiFi RSSI/IP, faults).
-                aqua::mqtt::publish_ha_system_discovery();
+                static bool     s_discovery_done = false;
+                static uint32_t s_last_dev_ver   = UINT32_MAX;
+                uint32_t cur_ver = g_devices.config_version();
+                if (s_discovery_done && cur_ver == s_last_dev_ver) {
+                    // Config unchanged since last discovery run — skip the burst.
+                    AC_LOGI("main", "MQTT reconnect: HA discovery skipped (config unchanged)");
+                } else {
+                    g_devices.for_each([](aqua::devices::IDevice& dev) {
+                        aqua::mqtt::publish_ha_discovery(dev);
+                        // Publish current state immediately so HA doesn't show
+                        // "Unknown" until the next scheduler-driven change.
+                        aqua::mqtt::publish_device_state(dev);
+                    });
+                    // Sensor discovery: sensor 0 = water, sensor 1 = ambient.
+                    aqua::mqtt::publish_ha_sensor_discovery(0, "AquaCtl Water");
+                    aqua::mqtt::publish_ha_sensor_discovery(1, "AquaCtl Ambient");
+                    // System status sensors (uptime, heap, WiFi RSSI/IP, faults).
+                    aqua::mqtt::publish_ha_system_discovery();
+                    s_discovery_done = true;
+                    s_last_dev_ver   = cur_ver;
+                }
                 // Announce (re)connect so HA automations can react.
                 aqua::mqtt::publish_event("mqtt_connect", "broker connected");
             });

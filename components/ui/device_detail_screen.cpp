@@ -64,9 +64,9 @@ enum class Action {
     Mode8h,
     ModeHold,
     PwmLevel,        // param = step delta (signed)
+    PwmLevelLo,      // param = step delta (lo-end analog output)
     PwmFadeIn,       // param = step delta
     PwmFadeOut,
-    RgbBrightness,
     RgbFadeIn,
     RgbFadeOut,
     RgbPreset,       // param = preset index
@@ -75,19 +75,19 @@ enum class Action {
 };
 
 struct RgbPreset {
-    LangKey     name_key;
-    uint8_t     r, g, b;
-    lv_color_t  color;
+    LangKey                  name_key;
+    aqua::devices::Hsv       hsv;
+    lv_color_t               color;
 };
 
 static const RgbPreset s_rgb_presets[] = {
-    {LangKey::RGB_WARM,    255, 180,  90, lv_color_hex(0xFFB45A)},
-    {LangKey::RGB_COOL,    220, 235, 255, lv_color_hex(0xDCEBFF)},
-    {LangKey::RGB_RED,     255,   0,   0, lv_color_hex(0xFF0000)},
-    {LangKey::RGB_GREEN,     0, 255,   0, lv_color_hex(0x00FF00)},
-    {LangKey::RGB_BLUE,      0,   0, 255, lv_color_hex(0x0000FF)},
-    {LangKey::RGB_MAGENTA, 255,   0, 255, lv_color_hex(0xFF00FF)},
-    {LangKey::RGB_CYAN,      0, 255, 255, lv_color_hex(0x00FFFF)},
+    {LangKey::RGB_WARM,    { 33.0f, 0.647f, 1.0f}, lv_color_hex(0xFFB45A)},
+    {LangKey::RGB_COOL,    {214.0f, 0.137f, 1.0f}, lv_color_hex(0xDCEBFF)},
+    {LangKey::RGB_RED,     {  0.0f, 1.000f, 1.0f}, lv_color_hex(0xFF0000)},
+    {LangKey::RGB_GREEN,   {120.0f, 1.000f, 1.0f}, lv_color_hex(0x00FF00)},
+    {LangKey::RGB_BLUE,    {240.0f, 1.000f, 1.0f}, lv_color_hex(0x0000FF)},
+    {LangKey::RGB_MAGENTA, {300.0f, 1.000f, 1.0f}, lv_color_hex(0xFF00FF)},
+    {LangKey::RGB_CYAN,    {180.0f, 1.000f, 1.0f}, lv_color_hex(0x00FFFF)},
 };
 
 struct State {
@@ -106,18 +106,22 @@ struct State {
     lv_obj_t*   btn_cancel      = nullptr;
 
     // PWM labels
-    lv_obj_t*   lbl_pwm_level   = nullptr;
-    lv_obj_t*   lbl_pwm_fin     = nullptr;
-    lv_obj_t*   lbl_pwm_fout    = nullptr;
+    lv_obj_t*   lbl_pwm_level    = nullptr;
+    lv_obj_t*   lbl_pwm_level_lo = nullptr;
+    lv_obj_t*   lbl_pwm_fin      = nullptr;
+    lv_obj_t*   lbl_pwm_fout     = nullptr;
 
     // RGB labels
-    lv_obj_t*   lbl_rgb_bright  = nullptr;
-    lv_obj_t*   lbl_rgb_fin     = nullptr;
-    lv_obj_t*   lbl_rgb_fout    = nullptr;
-    lv_obj_t*   lbl_rgb_swatch  = nullptr;
-    lv_obj_t*   sld_rgb_r       = nullptr;
-    lv_obj_t*   sld_rgb_g       = nullptr;
-    lv_obj_t*   sld_rgb_b       = nullptr;
+    lv_obj_t*   lbl_rgb_fin       = nullptr;
+    lv_obj_t*   lbl_rgb_fout      = nullptr;
+    lv_obj_t*   lbl_rgb_swatch    = nullptr;   // Hi color preview
+    lv_obj_t*   lbl_rgb_swatch_lo = nullptr;   // Lo color preview
+    lv_obj_t*   sld_rgb_h         = nullptr;   // Hi: hue 0-360
+    lv_obj_t*   sld_rgb_s         = nullptr;   // Hi: saturation 0-100
+    lv_obj_t*   sld_rgb_v         = nullptr;   // Hi: value 0-100
+    lv_obj_t*   sld_rgb_h_lo      = nullptr;   // Lo: hue 0-360
+    lv_obj_t*   sld_rgb_s_lo      = nullptr;   // Lo: saturation 0-100
+    lv_obj_t*   sld_rgb_v_lo      = nullptr;   // Lo: value 0-100
 
     // Relay labels
     lv_obj_t*   lbl_relay_polarity = nullptr;
@@ -172,6 +176,26 @@ static void flush_save(State* st) {
     }
     st->save_pending = false;
     aqua::scheduler::wake_now();
+
+    // UI-4: Show a brief "Saved" toast so the user knows the change persisted.
+    lv_obj_t* layer = lv_layer_top();
+    lv_obj_t* toast = lv_label_create(layer);
+    lv_label_set_text(toast, i18n::tr(i18n::LangKey::MSG_SAVED));
+    lv_obj_set_style_text_font(toast, theme::font_body(), 0);
+    lv_obj_set_style_text_color(toast, lv_color_hex(0xFFFFFF), 0);
+    lv_obj_set_style_bg_color(toast, lv_color_hex(0x222222), 0);
+    lv_obj_set_style_bg_opa(toast, LV_OPA_80, 0);
+    lv_obj_set_style_pad_hor(toast, theme::PAD_MD, 0);
+    lv_obj_set_style_pad_ver(toast, theme::PAD_SM, 0);
+    lv_obj_set_style_radius(toast, theme::RADIUS_PILL, 0);
+    lv_obj_align(toast, LV_ALIGN_BOTTOM_MID, 0, -theme::PAD_LG);
+    // Auto-delete after 1500 ms via a one-shot timer.
+    lv_timer_t* t = lv_timer_create([](lv_timer_t* tmr) {
+        lv_obj_t* lbl = static_cast<lv_obj_t*>(lv_timer_get_user_data(tmr));
+        if (lbl && lv_obj_is_valid(lbl)) lv_obj_del(lbl);
+        lv_timer_del(tmr);
+    }, 1500, toast);
+    (void)t;
 }
 
 static void save_timer_cb(lv_timer_t* t) {
@@ -230,7 +254,12 @@ static void refresh(State* st);
 
 // Allocate an ActionCtx, attach click + delete handlers.
 static void bind_action(lv_obj_t* widget, State* st, Action act, int param) {
-    auto* c = new ActionCtx{st, act, param};
+    // H-6: use nothrow — OOM must not crash the device during a UI interaction.
+    auto* c = new(std::nothrow) ActionCtx{st, act, param};
+    if (!c) {
+        AC_LOGE(TAG, "ActionCtx alloc failed — button inoperative");
+        return;
+    }
     lv_obj_add_event_cb(widget, on_action,      LV_EVENT_CLICKED, c);
     lv_obj_add_event_cb(widget, on_ctx_delete,  LV_EVENT_DELETE,  c);
 }
@@ -358,6 +387,19 @@ static void pwm_level_step(State* st, int delta) {
     schedule_save(st);
 }
 
+static void pwm_level_lo_step(State* st, int delta) {
+    auto* dev = lookup(st->device_id);
+    if (!dev || dev->get_type() != aqua::devices::DeviceType::PWM) return;
+    auto* p = static_cast<aqua::devices::PwmDevice*>(dev);
+    int v = (int)p->level_lo_pct + delta;
+    p->level_lo_pct = (uint8_t)std::clamp(v, 0, 100);
+    if (st->lbl_pwm_level_lo) {
+        char b[16]; snprintf(b, sizeof(b), "%u%%", (unsigned)p->level_lo_pct);
+        lv_label_set_text(st->lbl_pwm_level_lo, b);
+    }
+    schedule_save(st);
+}
+
 static void pwm_fade_step(State* st, int delta, bool is_fade_in) {
     auto* dev = lookup(st->device_id);
     if (!dev || dev->get_type() != aqua::devices::DeviceType::PWM) return;
@@ -370,20 +412,6 @@ static void pwm_fade_step(State* st, int delta, bool is_fade_in) {
     if (lbl) {
         char b[16]; snprintf(b, sizeof(b), "%d min", v);
         lv_label_set_text(lbl, b);
-    }
-    schedule_save(st);
-}
-
-static void rgb_bright_step(State* st, int delta) {
-    auto* dev = lookup(st->device_id);
-    if (!dev || dev->get_type() != aqua::devices::DeviceType::RGB) return;
-    auto* g = static_cast<aqua::devices::RgbDevice*>(dev);
-    int v = (int)g->brightness_pct + delta;
-    g->brightness_pct = (uint8_t)std::clamp(v, 0, 100);
-    if (st->lbl_rgb_bright) {
-        char b[16]; snprintf(b, sizeof(b), "%u%%",
-                             (unsigned)g->brightness_pct);
-        lv_label_set_text(st->lbl_rgb_bright, b);
     }
     schedule_save(st);
 }
@@ -404,17 +432,49 @@ static void rgb_fade_step(State* st, int delta, bool is_fade_in) {
     schedule_save(st);
 }
 
-// Sync slider positions to the device's current color (no save, no apply).
+// Sync slider positions to the device's current HSV color (no save, no apply).
+static void refresh_rgb_sliders(State* st, aqua::devices::RgbDevice* g);  // fwd
+
+// Derive an lv_color_t from an Hsv value.
+static inline lv_color_t hsv_to_lvc(aqua::devices::Hsv hsv) {
+    aqua::devices::Rgb8 rgb = aqua::devices::hsv_to_rgb(hsv);
+    return lv_color_make(rgb.r, rgb.g, rgb.b);
+}
+static inline void set_sld_color(lv_obj_t* sld, lv_color_t c) {
+    if (!sld) return;
+    lv_obj_set_style_bg_color(sld, c, LV_PART_INDICATOR);
+    lv_obj_set_style_bg_color(sld, c, LV_PART_KNOB);
+}
+// Update each slider's indicator so it reflects HSV semantics:
+//   H slider → pure hue at full S/V
+//   S slider → current hue at current S, full V
+//   V slider → full current color (same as swatch)
+static void update_slider_colors(State* st, aqua::devices::RgbDevice* g) {
+    if (!g) return;
+    auto& hi = g->color_hsv;
+    set_sld_color(st->sld_rgb_h,    hsv_to_lvc({hi.h, 1.0f, 1.0f}));
+    set_sld_color(st->sld_rgb_s,    hsv_to_lvc({hi.h, hi.s, 1.0f}));
+    set_sld_color(st->sld_rgb_v,    hsv_to_lvc(hi));
+    auto& lo = g->color_lo_hsv;
+    set_sld_color(st->sld_rgb_h_lo, hsv_to_lvc({lo.h, 1.0f, 1.0f}));
+    set_sld_color(st->sld_rgb_s_lo, hsv_to_lvc({lo.h, lo.s, 1.0f}));
+    set_sld_color(st->sld_rgb_v_lo, hsv_to_lvc(lo));
+}
+
 static void refresh_rgb_sliders(State* st, aqua::devices::RgbDevice* g) {
-    if (st->sld_rgb_r) lv_slider_set_value(st->sld_rgb_r, g->color.r, LV_ANIM_OFF);
-    if (st->sld_rgb_g) lv_slider_set_value(st->sld_rgb_g, g->color.g, LV_ANIM_OFF);
-    if (st->sld_rgb_b) lv_slider_set_value(st->sld_rgb_b, g->color.b, LV_ANIM_OFF);
+    if (st->sld_rgb_h)    lv_slider_set_value(st->sld_rgb_h,    (int)g->color_hsv.h, LV_ANIM_OFF);
+    if (st->sld_rgb_s)    lv_slider_set_value(st->sld_rgb_s,    (int)(g->color_hsv.s * 100.0f + 0.5f), LV_ANIM_OFF);
+    if (st->sld_rgb_v)    lv_slider_set_value(st->sld_rgb_v,    (int)(g->color_hsv.v * 100.0f + 0.5f), LV_ANIM_OFF);
+    if (st->sld_rgb_h_lo) lv_slider_set_value(st->sld_rgb_h_lo, (int)g->color_lo_hsv.h, LV_ANIM_OFF);
+    if (st->sld_rgb_s_lo) lv_slider_set_value(st->sld_rgb_s_lo, (int)(g->color_lo_hsv.s * 100.0f + 0.5f), LV_ANIM_OFF);
+    if (st->sld_rgb_v_lo) lv_slider_set_value(st->sld_rgb_v_lo, (int)(g->color_lo_hsv.v * 100.0f + 0.5f), LV_ANIM_OFF);
+    update_slider_colors(st, g);
 }
 
 // Per-slider context allocated once and stored via lv_obj_set_user_data.
-struct RgbSliderCtx { State* st; int channel; };
+struct RgbSliderCtx { State* st; int channel; bool is_lo; };
 
-// Called from LVGL VALUE_CHANGED event on one of the 3 RGB sliders.
+// Called from LVGL VALUE_CHANGED event on one of the 3 HSV sliders.
 static void on_rgb_slider(lv_event_t* e) {
     auto* ctx = static_cast<RgbSliderCtx*>(lv_event_get_user_data(e));
     if (!ctx) return;
@@ -424,17 +484,25 @@ static void on_rgb_slider(lv_event_t* e) {
     auto* g = static_cast<aqua::devices::RgbDevice*>(dev);
     lv_obj_t* sld = static_cast<lv_obj_t*>(lv_event_get_target(e));
     int val = (int)lv_slider_get_value(sld);
-    if (val < 0) val = 0;
-    if (val > 255) val = 255;
-    if      (ctx->channel == 0) g->color.r = (uint8_t)val;
-    else if (ctx->channel == 1) g->color.g = (uint8_t)val;
-    else                         g->color.b = (uint8_t)val;
-    // Update swatch.
-    if (st->lbl_rgb_swatch)
-        lv_obj_set_style_bg_color(st->lbl_rgb_swatch,
-            lv_color_make(g->color.r, g->color.g, g->color.b), 0);
-    // Live apply.
-    if (g->current_active()) g->apply(true, /*force=*/true);
+    // Route to hi or lo color field.
+    auto& color = ctx->is_lo ? g->color_lo_hsv : g->color_hsv;
+    // channel 0 = H (0-360), 1 = S (0-100), 2 = V (0-100)
+    if (ctx->channel == 0) {
+        color.h = (float)std::clamp(val, 0, 360);
+    } else if (ctx->channel == 1) {
+        color.s = (float)std::clamp(val, 0, 100) / 100.0f;
+    } else {
+        color.v = (float)std::clamp(val, 0, 100) / 100.0f;
+    }
+    // Update the swatch for the group that changed.
+    aqua::devices::Rgb8 rgb = aqua::devices::hsv_to_rgb(color);
+    lv_color_t lvc = lv_color_make(rgb.r, rgb.g, rgb.b);
+    lv_obj_t* swatch = ctx->is_lo ? st->lbl_rgb_swatch_lo : st->lbl_rgb_swatch;
+    if (swatch) lv_obj_set_style_bg_color(swatch, lvc, 0);
+    // Update all slider indicator colors.
+    update_slider_colors(st, g);
+    // Live apply only for hi color changes while device is active.
+    if (!ctx->is_lo && g->current_active()) g->apply(true, /*force=*/true);
     schedule_save(st);
 }
 
@@ -443,11 +511,13 @@ static void rgb_apply_preset(State* st, int idx) {
     if (!dev || dev->get_type() != aqua::devices::DeviceType::RGB) return;
     auto* g = static_cast<aqua::devices::RgbDevice*>(dev);
     const auto& p = s_rgb_presets[idx];
-    g->color = {p.r, p.g, p.b};
+    g->color_hsv = p.hsv;
+    aqua::devices::Rgb8 rgb = aqua::devices::hsv_to_rgb(p.hsv);
     if (st->lbl_rgb_swatch) {
-        lv_obj_set_style_bg_color(st->lbl_rgb_swatch, p.color, 0);
+        lv_obj_set_style_bg_color(st->lbl_rgb_swatch,
+            lv_color_make(rgb.r, rgb.g, rgb.b), 0);
     }
-    refresh_rgb_sliders(st, g);
+    refresh_rgb_sliders(st, g);  // also calls update_slider_colors
     // Live apply: if device is currently active, reflect the new color now.
     if (g->current_active()) {
         g->apply(true, /*force=*/true);
@@ -602,10 +672,10 @@ static void on_action(lv_event_t* e) {
                 st->target_active);
             break;
 
-        case Action::PwmLevel:    pwm_level_step(st, c->param);            break;
+        case Action::PwmLevel:    pwm_level_step   (st, c->param);            break;
+        case Action::PwmLevelLo:  pwm_level_lo_step(st, c->param);            break;
         case Action::PwmFadeIn:   pwm_fade_step (st, c->param, true);      break;
         case Action::PwmFadeOut:  pwm_fade_step (st, c->param, false);     break;
-        case Action::RgbBrightness: rgb_bright_step(st, c->param);         break;
         case Action::RgbFadeIn:   rgb_fade_step(st, c->param, true);       break;
         case Action::RgbFadeOut:  rgb_fade_step(st, c->param, false);      break;
         case Action::RgbPreset:   rgb_apply_preset(st, c->param);          break;
@@ -896,6 +966,18 @@ static void build_pwm_card(State* st, lv_obj_t* parent,
     st->lbl_pwm_level = make_stepper_row(card, tr(LangKey::DEV_LEVEL), b,
         st, Action::PwmLevel, -5, Action::PwmLevel, +5);
 
+    snprintf(b, sizeof(b), "%u%%", (unsigned)p.level_lo_pct);
+    st->lbl_pwm_level_lo = make_stepper_row(card, tr(LangKey::DEV_LEVEL_LO), b,
+        st, Action::PwmLevelLo, -5, Action::PwmLevelLo, +5);
+    {
+        lv_obj_t* hint = lv_label_create(card);
+        lv_label_set_text(hint, tr(LangKey::DEV_LEVEL_LO_HINT));
+        lv_obj_set_style_text_font(hint, theme::font_caption(), 0);
+        lv_obj_set_style_text_color(hint, theme::color_text_disabled(), 0);
+        lv_label_set_long_mode(hint, LV_LABEL_LONG_WRAP);
+        lv_obj_set_width(hint, LV_PCT(100));
+    }
+
     snprintf(b, sizeof(b), "%u min", (unsigned)p.fade_in_min);
     st->lbl_pwm_fin = make_stepper_row(card, tr(LangKey::DEV_FADE_IN), b,
         st, Action::PwmFadeIn,  -1, Action::PwmFadeIn,  +1);
@@ -910,13 +992,25 @@ static void build_rgb_card(State* st, lv_obj_t* parent,
     lv_obj_t* card = make_card(parent, tr(LangKey::DEV_RGB_SETTINGS));
     char b[16];
 
+    // ---- Color Hi (main ON color) ------------------------------------------
+    {
+        lv_obj_t* sec = lv_label_create(card);
+        lv_label_set_text(sec, tr(LangKey::DEV_COLOR_HI));
+        lv_obj_set_style_text_font(sec, theme::font_body(), 0);
+        lv_obj_set_style_text_color(sec, theme::color_accent(), 0);
+    }
+
+    // Colour swatch + preset buttons row.
     lv_obj_t* row_color = make_row(card);
     st->lbl_rgb_swatch = lv_obj_create(row_color);
     lv_obj_set_size(st->lbl_rgb_swatch, 56, 56);
     lv_obj_set_style_radius(st->lbl_rgb_swatch, theme::RADIUS_MD, 0);
     lv_obj_set_style_bg_opa(st->lbl_rgb_swatch, LV_OPA_COVER, 0);
-    lv_obj_set_style_bg_color(st->lbl_rgb_swatch,
-        lv_color_make(g.color.r, g.color.g, g.color.b), 0);
+    {
+        aqua::devices::Rgb8 init_rgb = aqua::devices::hsv_to_rgb(g.color_hsv);
+        lv_obj_set_style_bg_color(st->lbl_rgb_swatch,
+            lv_color_make(init_rgb.r, init_rgb.g, init_rgb.b), 0);
+    }
     lv_obj_set_style_border_color(st->lbl_rgb_swatch,
                                   theme::color_outline(), 0);
     lv_obj_set_style_border_width(st->lbl_rgb_swatch, 1, 0);
@@ -936,29 +1030,28 @@ static void build_rgb_card(State* st, lv_obj_t* parent,
         bind_action(btn, st, Action::RgbPreset, i);
     }
 
-    // ---- Custom color: R / G / B sliders ----------------------------------
-    // A helper lambda to build one labeled slider row.
-    auto make_rgb_slider = [&](const char* ch_label, int channel,
-                                lv_color_t bar_color, uint8_t init_val) -> lv_obj_t* {
+    // ---- Custom colour: H / S / V sliders ----------------------------------
+    // Lambda builds one labelled slider row.  Indicator color is set to a
+    // placeholder; update_slider_colors() corrects all indicators at the end.
+    auto make_hsv_slider = [&](const char* lbl_text, int channel, bool is_lo,
+                                int max_val, int init_val_i) -> lv_obj_t* {
         lv_obj_t* row = make_row(card);
         lv_obj_set_style_pad_row(row, theme::PAD_SM, 0);
 
         lv_obj_t* lbl = lv_label_create(row);
-        lv_obj_set_style_text_color(lbl, bar_color, 0);
+        lv_obj_set_style_text_color(lbl, theme::color_text_secondary(), 0);
         lv_obj_set_style_text_font(lbl, theme::font_body(), 0);
-        lv_label_set_text(lbl, ch_label);
-        lv_obj_set_style_min_width(lbl, 18, 0);
+        lv_label_set_text(lbl, lbl_text);
+        lv_obj_set_style_min_width(lbl, 36, 0);
 
         lv_obj_t* sld = lv_slider_create(row);
-        lv_slider_set_range(sld, 0, 255);
-        lv_slider_set_value(sld, init_val, LV_ANIM_OFF);
+        lv_slider_set_range(sld, 0, max_val);
+        lv_slider_set_value(sld, init_val_i, LV_ANIM_OFF);
         lv_obj_set_height(sld, 20);
         lv_obj_set_flex_grow(sld, 1);
-        // Style the indicator (filled bar) with the channel color.
-        lv_obj_set_style_bg_color(sld, bar_color, LV_PART_INDICATOR);
-        lv_obj_set_style_bg_color(sld, bar_color, LV_PART_KNOB);
-        // Allocate context — owned by the lv_obj via user_data.
-        auto* ctx = new RgbSliderCtx{st, channel};
+        lv_obj_set_style_bg_color(sld, theme::color_text_disabled(), LV_PART_INDICATOR);
+        lv_obj_set_style_bg_color(sld, theme::color_text_disabled(), LV_PART_KNOB);
+        auto* ctx = new RgbSliderCtx{st, channel, is_lo};
         lv_obj_add_event_cb(sld, on_rgb_slider, LV_EVENT_VALUE_CHANGED, ctx);
         lv_obj_add_event_cb(sld, [](lv_event_t* e){
             delete static_cast<RgbSliderCtx*>(lv_event_get_user_data(e));
@@ -966,13 +1059,47 @@ static void build_rgb_card(State* st, lv_obj_t* parent,
         return sld;
     };
 
-    st->sld_rgb_r = make_rgb_slider("R", 0, lv_color_hex(0xFF4444), g.color.r);
-    st->sld_rgb_g = make_rgb_slider("G", 1, lv_color_hex(0x44CC44), g.color.g);
-    st->sld_rgb_b = make_rgb_slider("B", 2, lv_color_hex(0x4488FF), g.color.b);
+    // ---- Color Hi sliders --------------------------------------------------
+    st->sld_rgb_h = make_hsv_slider(tr(LangKey::DEV_HUE), 0, false, 360,
+                                    (int)g.color_hsv.h);
+    st->sld_rgb_s = make_hsv_slider(tr(LangKey::DEV_SAT), 1, false, 100,
+                                    (int)(g.color_hsv.s * 100.0f + 0.5f));
+    st->sld_rgb_v = make_hsv_slider(tr(LangKey::DEV_VAL), 2, false, 100,
+                                    (int)(g.color_hsv.v * 100.0f + 0.5f));
 
-    snprintf(b, sizeof(b), "%u%%", (unsigned)g.brightness_pct);
-    st->lbl_rgb_bright = make_stepper_row(card, tr(LangKey::DEV_BRIGHTNESS), b,
-        st, Action::RgbBrightness, -5, Action::RgbBrightness, +5);
+    // ---- Color Lo (analog low-end for TEMP_MAP) ----------------------------
+    {
+        lv_obj_t* sec = lv_label_create(card);
+        lv_label_set_text(sec, tr(LangKey::DEV_COLOR_LO));
+        lv_obj_set_style_text_font(sec, theme::font_body(), 0);
+        lv_obj_set_style_text_color(sec, theme::color_text_secondary(), 0);
+    }
+    {
+        lv_obj_t* row_lo = make_row(card);
+        st->lbl_rgb_swatch_lo = lv_obj_create(row_lo);
+        lv_obj_set_size(st->lbl_rgb_swatch_lo, 40, 40);
+        lv_obj_set_style_radius(st->lbl_rgb_swatch_lo, theme::RADIUS_MD, 0);
+        lv_obj_set_style_bg_opa(st->lbl_rgb_swatch_lo, LV_OPA_COVER, 0);
+        {
+            aqua::devices::Rgb8 lo_rgb = aqua::devices::hsv_to_rgb(g.color_lo_hsv);
+            lv_obj_set_style_bg_color(st->lbl_rgb_swatch_lo,
+                lv_color_make(lo_rgb.r, lo_rgb.g, lo_rgb.b), 0);
+        }
+        lv_obj_set_style_border_color(st->lbl_rgb_swatch_lo,
+                                      theme::color_outline(), 0);
+        lv_obj_set_style_border_width(st->lbl_rgb_swatch_lo, 1, 0);
+        lv_obj_clear_flag(st->lbl_rgb_swatch_lo, LV_OBJ_FLAG_SCROLLABLE);
+    }
+
+    st->sld_rgb_h_lo = make_hsv_slider(tr(LangKey::DEV_HUE), 0, true, 360,
+                                       (int)g.color_lo_hsv.h);
+    st->sld_rgb_s_lo = make_hsv_slider(tr(LangKey::DEV_SAT), 1, true, 100,
+                                       (int)(g.color_lo_hsv.s * 100.0f + 0.5f));
+    st->sld_rgb_v_lo = make_hsv_slider(tr(LangKey::DEV_VAL), 2, true, 100,
+                                       (int)(g.color_lo_hsv.v * 100.0f + 0.5f));
+
+    // Set initial indicator colors for all sliders.
+    update_slider_colors(st, &g);
 
     snprintf(b, sizeof(b), "%u min", (unsigned)g.fade_in_min);
     st->lbl_rgb_fin = make_stepper_row(card, tr(LangKey::DEV_FADE_IN), b,

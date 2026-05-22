@@ -42,6 +42,7 @@
 #include "screen_manager.h"
 #include "sensor_sampler.h"
 #include "solar_trigger.h"
+#include "temp_map_trigger.h"
 #include "temp_trigger.h"
 #include "theme.h"
 #include "time_manager.h"
@@ -136,6 +137,7 @@ static lv_color_t type_badge_color(aqua::triggers::TriggerType t) {
         case aqua::triggers::TriggerType::SCHEDULE: return theme::color_accent();
         case aqua::triggers::TriggerType::SOLAR:    return theme::color_warning();
         case aqua::triggers::TriggerType::TEMP:     return theme::color_error();
+        case aqua::triggers::TriggerType::TEMP_MAP: return theme::color_accent();
         default:                                    return theme::color_text_disabled();
     }
 }
@@ -145,6 +147,7 @@ static const char* type_badge_text(aqua::triggers::TriggerType t) {
         case aqua::triggers::TriggerType::SCHEDULE: return "SCHED";
         case aqua::triggers::TriggerType::SOLAR:    return "SOLAR";
         case aqua::triggers::TriggerType::TEMP:     return "TEMP";
+        case aqua::triggers::TriggerType::TEMP_MAP: return "TMAP";
         default:                                    return "?";
     }
 }
@@ -208,6 +211,15 @@ struct EditState {
     lv_obj_t* roller_thresh    = nullptr;   // temp_threshold container
     lv_obj_t* roller_hyst      = nullptr;   // fractional_tenth roller
     lv_obj_t* lbl_temp_summary = nullptr;   // live "Water > 28.5\xc2\xb0""C  \xc2\xb1""0.5\xc2\xb0""C"
+
+    // TempMap-specific.
+    lv_obj_t* cont_temp_map      = nullptr;
+    lv_obj_t* sw_tmap_sensor     = nullptr;   // OFF=Water ON=Ambient
+    lv_obj_t* lbl_tmap_sensor    = nullptr;
+    lv_obj_t* sw_tmap_reverse    = nullptr;   // OFF=forward ON=reverse (Hi→Lo)
+    lv_obj_t* roller_tmap_hyst  = nullptr;   // hysteresis_c
+    lv_obj_t* roller_tmap_lo     = nullptr;   // temp_lo_c
+    lv_obj_t* roller_tmap_hi     = nullptr;   // temp_hi_c
 
     // Linked device checkboxes (one per device, parallel array with IDs).
     std::vector<lv_obj_t*>  dev_checks;
@@ -339,6 +351,9 @@ static void apply_edit(EditState* st) {
             case aqua::triggers::TriggerType::TEMP:
                 new_trig = std::make_unique<aqua::triggers::TempTrigger>(nid, nm);
                 break;
+            case aqua::triggers::TriggerType::TEMP_MAP:
+                new_trig = std::make_unique<aqua::triggers::TempMapTrigger>(nid, nm);
+                break;
         }
         trig = tm->add(std::move(new_trig));
     }
@@ -423,6 +438,15 @@ static void apply_edit(EditState* st) {
                              : aqua::triggers::TempCondition::ABOVE;
             t->threshold_c  = drum_roller::get_temp_threshold(st->roller_thresh);
             t->hysteresis_c = drum_roller::get_fractional_tenth(st->roller_hyst);
+            break;
+        }
+        case aqua::triggers::TriggerType::TEMP_MAP: {
+            auto* t = static_cast<aqua::triggers::TempMapTrigger*>(trig);
+            t->sensor_id    = lv_obj_has_state(st->sw_tmap_sensor, LV_STATE_CHECKED) ? 1u : 0u;
+            t->reverse      = lv_obj_has_state(st->sw_tmap_reverse, LV_STATE_CHECKED);
+            t->hysteresis_c = drum_roller::get_fractional_tenth(st->roller_tmap_hyst);
+            t->temp_lo_c    = drum_roller::get_temp_threshold(st->roller_tmap_lo);
+            t->temp_hi_c    = drum_roller::get_temp_threshold(st->roller_tmap_hi);
             break;
         }
     }
@@ -1171,12 +1195,24 @@ static void build_temp_section(EditState* st, lv_obj_t* scroll,
 // Build the linked-device checkbox list.
 // Devices are laid out in a 2-column row-wrap so we fill the 800 px width
 // instead of one tall single-column scroller.
+// For TEMP_MAP triggers relay devices are excluded — they cannot do analog levels.
 static void build_device_links(EditState* st, lv_obj_t* scroll,
-                                aqua::triggers::ITrigger* trig) {
+                                aqua::triggers::ITrigger* trig,
+                                aqua::triggers::TriggerType type) {
     auto* dm = aqua::ui::ui_context().devices;
     if (!dm) return;
 
     make_section_label(scroll, tr(LangKey::TRG_LINKED_DEVICES));
+
+    // For TEMP_MAP show a small note explaining why relay devices are absent.
+    if (type == aqua::triggers::TriggerType::TEMP_MAP) {
+        lv_obj_t* note = lv_label_create(scroll);
+        lv_label_set_text(note, tr(LangKey::TRG_TMAP_RELAY_SKIP));
+        lv_obj_set_style_text_font(note, theme::font_caption(), 0);
+        lv_obj_set_style_text_color(note, theme::color_text_disabled(), 0);
+        lv_label_set_long_mode(note, LV_LABEL_LONG_WRAP);
+        lv_obj_set_width(note, LV_PCT(100));
+    }
 
     lv_obj_t* grid = lv_obj_create(scroll);
     lv_obj_set_size(grid, LV_PCT(100), LV_SIZE_CONTENT);
@@ -1191,6 +1227,9 @@ static void build_device_links(EditState* st, lv_obj_t* scroll,
     lv_obj_clear_flag(grid, LV_OBJ_FLAG_SCROLLABLE);
 
     dm->for_each([&](aqua::devices::IDevice& dev) {
+        // TEMP_MAP uses apply_analog(); relay devices can't do analog — skip.
+        if (type == aqua::triggers::TriggerType::TEMP_MAP &&
+            dev.get_type() == aqua::devices::DeviceType::RELAY) return;
         bool linked = false;
         if (trig) {
             for (uint8_t did : trig->linked_device_ids)
@@ -1208,6 +1247,109 @@ static void build_device_links(EditState* st, lv_obj_t* scroll,
         st->dev_checks.push_back(cb);
         st->dev_ids.push_back(dev.id);
     });
+}
+
+static void build_temp_map_section(EditState* st, lv_obj_t* scroll,
+                                    aqua::triggers::TempMapTrigger* trig) {
+    st->cont_temp_map = lv_obj_create(scroll);
+    lv_obj_set_width(st->cont_temp_map, LV_PCT(100));
+    lv_obj_set_height(st->cont_temp_map, LV_SIZE_CONTENT);
+    lv_obj_set_style_bg_opa(st->cont_temp_map, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(st->cont_temp_map, 0, 0);
+    lv_obj_set_style_pad_all(st->cont_temp_map, 0, 0);
+    lv_obj_set_style_pad_row(st->cont_temp_map, theme::PAD_SM, 0);
+    lv_obj_set_flex_flow(st->cont_temp_map, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(st->cont_temp_map, LV_FLEX_ALIGN_START,
+                          LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
+
+    // ── Explanatory info card ─────────────────────────────────────────────
+    {
+        lv_obj_t* card = lv_obj_create(st->cont_temp_map);
+        lv_obj_set_size(card, LV_PCT(100), LV_SIZE_CONTENT);
+        lv_obj_set_style_bg_color(card, theme::color_surface_alt(), 0);
+        lv_obj_set_style_bg_opa(card, LV_OPA_COVER, 0);
+        lv_obj_set_style_border_color(card, theme::color_accent(), 0);
+        lv_obj_set_style_border_width(card, 1, 0);
+        lv_obj_set_style_radius(card, theme::RADIUS_SM, 0);
+        lv_obj_set_style_pad_hor(card, theme::PAD_MD, 0);
+        lv_obj_set_style_pad_ver(card, theme::PAD_SM, 0);
+        lv_obj_clear_flag(card, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_t* lbl = lv_label_create(card);
+        lv_label_set_text(lbl, tr(LangKey::TRG_TMAP_INFO));
+        lv_obj_set_style_text_font(lbl, theme::font_caption(), 0);
+        lv_obj_set_style_text_color(lbl, theme::color_text_secondary(), 0);
+        lv_label_set_long_mode(lbl, LV_LABEL_LONG_WRAP);
+        lv_obj_set_width(lbl, LV_PCT(100));
+    }
+
+    // ── Sensor toggle: OFF=Water, ON=Ambient ─────────────────────────────
+    {
+        bool is_ambient = trig && trig->sensor_id == 1;
+        lv_obj_t* row = lv_obj_create(st->cont_temp_map);
+        lv_obj_set_size(row, LV_PCT(100), LV_SIZE_CONTENT);
+        lv_obj_set_style_bg_opa(row, LV_OPA_TRANSP, 0);
+        lv_obj_set_style_border_width(row, 0, 0);
+        lv_obj_set_style_pad_all(row, 0, 0);
+        lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+        lv_obj_set_flex_align(row, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+        lv_obj_set_style_pad_column(row, theme::PAD_SM, 0);
+        make_field_label(row, tr(LangKey::TRG_SENSOR));
+        lv_obj_t* sw = lv_switch_create(row);
+        if (is_ambient) lv_obj_add_state(sw, LV_STATE_CHECKED);
+        lv_obj_set_style_bg_color(sw, theme::color_accent(),
+                                  LV_PART_INDICATOR | LV_STATE_CHECKED);
+        st->sw_tmap_sensor = sw;
+        lv_obj_t* lbl = lv_label_create(row);
+        lv_label_set_text(lbl, tr(is_ambient ? LangKey::SENSE_AMBIENT : LangKey::SENSE_WATER));
+        lv_obj_set_style_text_font(lbl, theme::font_body(), 0);
+        lv_obj_set_style_text_color(lbl, theme::color_text_secondary(), 0);
+        st->lbl_tmap_sensor = lbl;
+    }
+    lv_obj_add_event_cb(st->sw_tmap_sensor, [](lv_event_t* ev) {
+        auto* s = static_cast<EditState*>(lv_event_get_user_data(ev));
+        bool ambient = lv_obj_has_state(s->sw_tmap_sensor, LV_STATE_CHECKED);
+        lv_label_set_text(s->lbl_tmap_sensor,
+                          tr(ambient ? LangKey::SENSE_AMBIENT : LangKey::SENSE_WATER));
+    }, LV_EVENT_VALUE_CHANGED, st);
+
+    // ── Reverse toggle: OFF=Lo→Hi (normal), ON=Hi→Lo (inverted) ─────────
+    {
+        bool is_reverse = trig && trig->reverse;
+        lv_obj_t* row = lv_obj_create(st->cont_temp_map);
+        lv_obj_set_size(row, LV_PCT(100), LV_SIZE_CONTENT);
+        lv_obj_set_style_bg_opa(row, LV_OPA_TRANSP, 0);
+        lv_obj_set_style_border_width(row, 0, 0);
+        lv_obj_set_style_pad_all(row, 0, 0);
+        lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+        lv_obj_set_flex_align(row, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+        lv_obj_set_style_pad_column(row, theme::PAD_SM, 0);
+        make_field_label(row, tr(LangKey::TRG_TMAP_REVERSE));
+        lv_obj_t* sw = lv_switch_create(row);
+        if (is_reverse) lv_obj_add_state(sw, LV_STATE_CHECKED);
+        lv_obj_set_style_bg_color(sw, theme::color_accent(),
+                                  LV_PART_INDICATOR | LV_STATE_CHECKED);
+        st->sw_tmap_reverse = sw;
+    }
+
+    // ── Hysteresis — dead-band to prevent rapid cycling ──────────────────
+    make_field_label(st->cont_temp_map, tr(LangKey::TRG_TMAP_HYSTERESIS));
+    {
+        float hyst = trig ? trig->hysteresis_c : 0.5f;
+        st->roller_tmap_hyst = drum_roller::fractional_tenth(st->cont_temp_map, hyst);
+    }
+
+    // ── Temperature range side-by-side (Lo on left, Hi on right) ─────────
+    {
+        lv_obj_t* pair = make_pair_row(st->cont_temp_map);
+        lv_obj_t* left  = make_pair_col(pair);
+        lv_obj_t* right = make_pair_col(pair);
+        make_field_label(left,  tr(LangKey::TRG_TMAP_TEMP_LO));
+        float lo = trig ? trig->temp_lo_c : 20.0f;
+        st->roller_tmap_lo = drum_roller::temp_threshold(left, lo);
+        make_field_label(right, tr(LangKey::TRG_TMAP_TEMP_HI));
+        float hi = trig ? trig->temp_hi_c : 30.0f;
+        st->roller_tmap_hi = drum_roller::temp_threshold(right, hi);
+    }
 }
 
 // ---- Build the edit screen ----
@@ -1311,10 +1453,14 @@ static lv_obj_t* build_edit_screen(aqua::triggers::ITrigger* trig,
             build_temp_section(st, scroll,
                 trig ? static_cast<aqua::triggers::TempTrigger*>(trig) : nullptr);
             break;
+        case aqua::triggers::TriggerType::TEMP_MAP:
+            build_temp_map_section(st, scroll,
+                trig ? static_cast<aqua::triggers::TempMapTrigger*>(trig) : nullptr);
+            break;
     }
 
-    // Linked devices.
-    build_device_links(st, scroll, trig);
+    // Linked devices (relay excluded for TEMP_MAP).
+    build_device_links(st, scroll, trig, typ);
 
     // Keyboard.
     st->keyboard = lv_keyboard_create(root);
@@ -1386,15 +1532,17 @@ static lv_obj_t* build_add_type_picker() {
     lv_obj_set_style_text_font(hdr, theme::font_title(), 0);
     lv_obj_set_style_text_color(hdr, theme::color_text_primary(), 0);
 
-    static TypePickCtx kSched = {aqua::triggers::TriggerType::SCHEDULE};
-    static TypePickCtx kSolar = {aqua::triggers::TriggerType::SOLAR};
-    static TypePickCtx kTemp  = {aqua::triggers::TriggerType::TEMP};
+    static TypePickCtx kSched   = {aqua::triggers::TriggerType::SCHEDULE};
+    static TypePickCtx kSolar   = {aqua::triggers::TriggerType::SOLAR};
+    static TypePickCtx kTemp    = {aqua::triggers::TriggerType::TEMP};
+    static TypePickCtx kTempMap = {aqua::triggers::TriggerType::TEMP_MAP};
 
     struct BtnDesc { const char* lbl; TypePickCtx* ctx; lv_color_t col; };
     BtnDesc descs[] = {
-        { LV_SYMBOL_LIST   " Schedule",     &kSched, theme::color_accent()   },
-        { LV_SYMBOL_REFRESH " Solar",       &kSolar, theme::color_warning()  },
-        { LV_SYMBOL_WARNING " Temperature", &kTemp,  theme::color_error()    },
+        { LV_SYMBOL_LIST    " Schedule",          &kSched,   theme::color_accent()  },
+        { LV_SYMBOL_REFRESH " Solar",             &kSolar,   theme::color_warning() },
+        { LV_SYMBOL_WARNING " Temperature",       &kTemp,    theme::color_error()   },
+        { LV_SYMBOL_SETTINGS" Temp \xe2\x86\x92 Analog", &kTempMap, theme::color_accent()  },
     };
 
     for (auto& d : descs) {
@@ -1708,6 +1856,13 @@ static void format_trigger_summary(const aqua::triggers::ITrigger& t,
             const char* cmp = (s.condition == TempCondition::BELOW) ? "<" : ">";
             snprintf(buf, buf_sz, "%s %s %.1f\xC2\xB0""C  hyst %.1f",
                      sensor, cmp, (double)s.threshold_c, (double)s.hysteresis_c);
+            break;
+        }
+        case TriggerType::TEMP_MAP: {
+            const auto& s = static_cast<const TempMapTrigger&>(t);
+            const char* sensor = s.sensor_id == 1 ? "Amb" : "Water";
+            snprintf(buf, buf_sz, "%s %.1f\xC2\xB0""C \xe2\x86\x92 %.1f\xC2\xB0""C",
+                     sensor, (double)s.temp_lo_c, (double)s.temp_hi_c);
             break;
         }
     }

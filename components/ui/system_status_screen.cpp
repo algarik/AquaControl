@@ -230,7 +230,9 @@ static void populate_scroll(lv_obj_t* scroll) {
     // ------- Recent Events -------
     make_section_label(scroll, tr(LangKey::SYS_RECENT_EVENTS));
     {
-        auto evts = aqua::history::recent(20);
+        // M-7: cap at 200 events to avoid OOM from loading the entire 96 KB
+        // events.log into heap on devices with fragmented memory after 12+ hours.
+        auto evts = aqua::history::recent(200);
         if (evts.empty()) {
             make_body_label(scroll, tr(LangKey::SYS_NO_EVENTS), theme::color_text_disabled());
         } else {

@@ -48,6 +48,7 @@ struct State {
     lv_obj_t* slider_dim      = nullptr;  // 5..80 %
     lv_obj_t* lbl_dim_val     = nullptr;  // "15 %"
     lv_obj_t* dd_timeout      = nullptr;  // dropdown
+    lv_obj_t* sw_screensaver  = nullptr;  // screensaver toggle
     lv_obj_t* btn_celsius     = nullptr;  // unit toggle
     lv_obj_t* btn_fahrenheit  = nullptr;
     bool      use_fahrenheit  = false;    // current selection
@@ -213,6 +214,9 @@ static void on_save(lv_event_t* e) {
         sys->inactivity_timeout_s = kTimeoutValues[sel];
     }
 
+    sys->screensaver_enabled =
+        lv_obj_has_state(st->sw_screensaver, LV_STATE_CHECKED);
+
     sys->temp_unit = st->use_fahrenheit
         ? aqua::storage::TempUnit::FAHRENHEIT
         : aqua::storage::TempUnit::CELSIUS;
@@ -347,6 +351,30 @@ lv_obj_t* build() {
         lv_obj_set_style_text_color(
             lv_dropdown_get_list(st->dd_timeout),
             theme::color_text_primary(), 0);
+    }
+
+    // Screensaver clock toggle
+    {
+        lv_obj_t* row = make_row(scroll);
+        make_body_label(row, tr(LangKey::DISP_SCREENSAVER));
+
+        st->sw_screensaver = lv_switch_create(row);
+        if (cfg.screensaver_enabled) {
+            lv_obj_add_state(st->sw_screensaver, LV_STATE_CHECKED);
+        }
+        // Style: accent fill when on, surface_alt knob background.
+        lv_obj_set_style_bg_color(st->sw_screensaver,
+                                  theme::color_accent(),
+                                  LV_PART_INDICATOR | LV_STATE_CHECKED);
+        lv_obj_set_style_bg_color(st->sw_screensaver,
+                                  theme::color_surface_alt(),
+                                  LV_PART_MAIN);
+        lv_obj_set_style_bg_color(st->sw_screensaver,
+                                  theme::color_outline(),
+                                  LV_PART_MAIN | LV_STATE_CHECKED);
+        lv_obj_set_style_bg_color(st->sw_screensaver,
+                                  lv_color_white(),
+                                  LV_PART_KNOB);
     }
 
     // ── Units section ────────────────────────────────────────────────────

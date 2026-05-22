@@ -4,6 +4,10 @@
 #include "relay_device.h"
 #include "rgb_device.h"
 
+#include "ac_logger.h"
+
+static const char* TAG = "DeviceManager";
+
 namespace aqua::devices {
 
 DeviceManager::DeviceManager() {
@@ -19,6 +23,7 @@ IDevice* DeviceManager::add(std::unique_ptr<IDevice> dev) {
     xSemaphoreTakeRecursive(mutex_, portMAX_DELAY);
     devices_.push_back(std::move(dev));
     xSemaphoreGiveRecursive(mutex_);
+    config_ver_.fetch_add(1, std::memory_order_release);
     return raw;
 }
 
@@ -40,6 +45,7 @@ bool DeviceManager::remove(uint8_t id) {
         if ((*it)->id == id) {
             devices_.erase(it);
             xSemaphoreGiveRecursive(mutex_);
+            config_ver_.fetch_add(1, std::memory_order_release);
             return true;
         }
     }
@@ -48,23 +54,27 @@ bool DeviceManager::remove(uint8_t id) {
 }
 
 uint8_t DeviceManager::next_free_id() const {
+    // L-4: O(n) bitmask scan instead of O(n²) nested loop.
+    // 256-bit bitmask: used[k] bit j is set when id (k*32 + j) is taken.
+    uint32_t used[8] = {};
     xSemaphoreTakeRecursive(mutex_, portMAX_DELAY);
-    for (uint16_t candidate = 1; candidate <= 255; ++candidate) {
-        bool taken = false;
-        for (auto& d : devices_) {
-            if (d->id == candidate) { taken = true; break; }
-        }
-        if (!taken) {
-            xSemaphoreGiveRecursive(mutex_);
-            return (uint8_t)candidate;
-        }
+    for (auto& d : devices_) {
+        uint8_t id = d->id;
+        if (id > 0) used[id / 32] |= (1u << (id % 32));
     }
     xSemaphoreGiveRecursive(mutex_);
+    for (int i = 1; i < 256; ++i) {
+        if (!(used[i / 32] & (1u << (i % 32)))) return (uint8_t)i;
+    }
     return 0;
 }
 
 void DeviceManager::for_each(const std::function<void(IDevice&)>& fn) {
-    xSemaphoreTakeRecursive(mutex_, portMAX_DELAY);
+    // A-4: timed wait on scheduler hot path — avoids infinite hang if mutex holder crashes.
+    if (xSemaphoreTakeRecursive(mutex_, pdMS_TO_TICKS(500)) != pdTRUE) {
+        AC_LOGE(TAG, "mutex timeout in for_each — skipping pass");
+        return;
+    }
     for (auto& d : devices_) {
         if (d->enabled) fn(*d);
     }

@@ -12,10 +12,9 @@ static const char* TAG = "Rgb";
 // Soft-fade tick interval.
 static constexpr uint64_t FADE_STEP_US = 100'000;   // 100 ms
 
-// Maps brightness-scaled 8-bit colour component to PCA9685's 12-bit duty.
-static inline uint16_t comp_to_duty(uint8_t c8, uint8_t brightness_pct) {
-    const uint32_t scaled = (static_cast<uint32_t>(c8) * brightness_pct) / 100u;
-    return static_cast<uint16_t>(scaled << 4);
+// Maps an 8-bit colour component to PCA9685's 12-bit duty cycle (0–4080).
+static inline uint16_t comp_to_duty12(uint8_t c8) {
+    return static_cast<uint16_t>(static_cast<uint16_t>(c8) << 4);
 }
 
 // ---------------------------------------------------------------------------
@@ -30,14 +29,13 @@ RgbDevice::~RgbDevice() {
 }
 
 // ---------------------------------------------------------------------------
-// apply() — entry point called by the scheduler
+// apply() — entry point called by the bool-pipeline scheduler
 // ---------------------------------------------------------------------------
 void RgbDevice::apply(bool active, bool force) {
     if (!enabled || pwm_ == nullptr) return;
     if (!force && current_active_.load(std::memory_order_relaxed) == active) return;
 
-    const RgbColor to_color = active ? color : RgbColor{0, 0, 0};
-    const uint8_t  to_brt   = active ? brightness_pct : 0u;
+    const Hsv to_hsv = active ? color_hsv : Hsv{0.0f, 0.0f, 0.0f};
 
     const uint32_t fade_ms = active
         ? static_cast<uint32_t>(fade_in_min)  * 60u * 1000u
@@ -45,29 +43,49 @@ void RgbDevice::apply(bool active, bool force) {
 
     if (fade_ms == 0) {
         stop_hsv_fade();
-        pwm_->set_pwm(base_channel_,     comp_to_duty(to_color.r, to_brt));
-        pwm_->set_pwm(base_channel_ + 1, comp_to_duty(to_color.g, to_brt));
-        pwm_->set_pwm(base_channel_ + 2, comp_to_duty(to_color.b, to_brt));
+        const Rgb8 rgb = hsv_to_rgb(to_hsv);
+        pwm_->set_pwm(base_channel_,     comp_to_duty12(rgb.r));
+        pwm_->set_pwm(base_channel_ + 1, comp_to_duty12(rgb.g));
+        pwm_->set_pwm(base_channel_ + 2, comp_to_duty12(rgb.b));
         taskENTER_CRITICAL(&fade_mux_);
-        current_color_ = to_color;
-        current_brt_   = to_brt;
+        current_hsv_ = to_hsv;
         taskEXIT_CRITICAL(&fade_mux_);
     } else {
-        start_hsv_fade(to_color, to_brt, fade_ms);
+        start_hsv_fade(to_hsv, fade_ms);
     }
 
     current_active_.store(active, std::memory_order_relaxed);
-    AC_LOGI(TAG, "%s (id=%u, base_ch=%u) -> %s rgb=(%u,%u,%u)%s",
+    AC_LOGI(TAG, "%s (id=%u, base_ch=%u) -> %s hsv=(%.0f,%.2f,%.2f)%s",
             name.c_str(), id, base_channel_, active ? "ON" : "OFF",
-            to_color.r, to_color.g, to_color.b,
+            (double)to_hsv.h, (double)to_hsv.s, (double)to_hsv.v,
             fade_ms ? " [hsv-fade]" : "");
+}
+
+// ---------------------------------------------------------------------------
+// apply_analog() — called by the TEMP_MAP analog scheduler pass
+// ---------------------------------------------------------------------------
+void RgbDevice::apply_analog(float t) {
+    if (!enabled || pwm_ == nullptr) return;
+    if (has_override()) return;
+    if (t < 0.0f) t = 0.0f;
+    if (t > 1.0f) t = 1.0f;
+
+    stop_hsv_fade();
+    const Hsv  mid = lerp_hsv_native(color_lo_hsv, color_hsv, t);
+    const Rgb8 rgb = hsv_to_rgb(mid);
+    pwm_->set_pwm(base_channel_,     comp_to_duty12(rgb.r));
+    pwm_->set_pwm(base_channel_ + 1, comp_to_duty12(rgb.g));
+    pwm_->set_pwm(base_channel_ + 2, comp_to_duty12(rgb.b));
+    taskENTER_CRITICAL(&fade_mux_);
+    current_hsv_ = mid;
+    taskEXIT_CRITICAL(&fade_mux_);
+    current_active_.store(mid.v > 0.0f, std::memory_order_relaxed);
 }
 
 // ---------------------------------------------------------------------------
 // HSV soft-fade helpers
 // ---------------------------------------------------------------------------
-void RgbDevice::start_hsv_fade(RgbColor to_color, uint8_t to_brt,
-                                uint32_t duration_ms) {
+void RgbDevice::start_hsv_fade(Hsv to_hsv, uint32_t duration_ms) {
     stop_hsv_fade();
 
     if (fade_timer_ == nullptr) {
@@ -80,8 +98,7 @@ void RgbDevice::start_hsv_fade(RgbColor to_color, uint8_t to_brt,
     }
 
     taskENTER_CRITICAL(&fade_mux_);
-    fade_to_color_ = to_color;
-    fade_to_brt_   = to_brt;
+    fade_to_hsv_   = to_hsv;
     fade_start_us_ = esp_timer_get_time();
     fade_dur_us_   = static_cast<uint64_t>(duration_ms) * 1000u;
     taskEXIT_CRITICAL(&fade_mux_);
@@ -101,41 +118,36 @@ void RgbDevice::fade_timer_cb(void* arg) {
 
 void RgbDevice::fade_tick() {
     // Snapshot shared state under spinlock (no I2C calls inside).
-    RgbColor from_c, to_c;
-    uint8_t  from_brt, to_brt;
+    Hsv      from_hsv, to_hsv;
     uint64_t start_us, dur_us;
 
     taskENTER_CRITICAL(&fade_mux_);
-    from_c   = current_color_;
-    from_brt = current_brt_;
-    to_c     = fade_to_color_;
-    to_brt   = fade_to_brt_;
+    from_hsv = current_hsv_;
+    to_hsv   = fade_to_hsv_;
     start_us = fade_start_us_;
     dur_us   = fade_dur_us_;
     taskEXIT_CRITICAL(&fade_mux_);
 
     const uint64_t elapsed = esp_timer_get_time() - start_us;
-    float t = (dur_us > 0) ? static_cast<float>(elapsed) / static_cast<float>(dur_us) : 1.0f;
+    float t = (dur_us > 0)
+        ? static_cast<float>(elapsed) / static_cast<float>(dur_us)
+        : 1.0f;
     const bool done = (t >= 1.0f);
     if (done) t = 1.0f;
 
-    // HSV-interpolated colour at time t.
-    const Rgb8 cur = lerp_hsv({from_c.r, from_c.g, from_c.b},
-                               {to_c.r, to_c.g, to_c.b}, t);
-    const uint8_t brt = static_cast<uint8_t>(
-        static_cast<float>(from_brt) + static_cast<float>(to_brt - from_brt) * t);
+    // Interpolate natively in HSV space — no RGB round-trip.
+    const Hsv  mid = lerp_hsv_native(from_hsv, to_hsv, t);
+    const Rgb8 rgb = hsv_to_rgb(mid);
 
     if (pwm_) {
-        pwm_->set_pwm(base_channel_,     comp_to_duty(cur.r, brt));
-        pwm_->set_pwm(base_channel_ + 1, comp_to_duty(cur.g, brt));
-        pwm_->set_pwm(base_channel_ + 2, comp_to_duty(cur.b, brt));
+        pwm_->set_pwm(base_channel_,     comp_to_duty12(rgb.r));
+        pwm_->set_pwm(base_channel_ + 1, comp_to_duty12(rgb.g));
+        pwm_->set_pwm(base_channel_ + 2, comp_to_duty12(rgb.b));
     }
 
     if (done) {
-        // Finalise — update tracking and stop timer.
         taskENTER_CRITICAL(&fade_mux_);
-        current_color_ = to_c;
-        current_brt_   = to_brt;
+        current_hsv_ = to_hsv;
         taskEXIT_CRITICAL(&fade_mux_);
         esp_timer_stop(fade_timer_);
     }

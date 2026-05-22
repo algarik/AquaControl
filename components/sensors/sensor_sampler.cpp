@@ -69,7 +69,7 @@ void store(Role r, const Reading& rd) {
     if (s.mtx) xSemaphoreGive(s.mtx);
 }
 
-static constexpr int kMaxConsecErrors = 3;  // errors before bus recovery attempt
+static constexpr int kMaxConsecErrors = 5;  // errors before bus recovery attempt
 static constexpr uint16_t kFaultCodeWater   = 0x0010;
 static constexpr uint16_t kFaultCodeAmbient = 0x0011;
 
@@ -80,7 +80,8 @@ void attempt_recovery(Role r, aqua::drivers::Sht3x* drv) {
     AC_LOGW(TAG, "%s sensor: attempting I2C bus reset + re-init",
             r == Role::WATER ? "water" : "ambient");
     drv->deinit();  // release stale handle before bus reset
-    s.cfg.bus->reset(200);
+    // M-4: use try_reset() to avoid double-reset if watchdog fires concurrently.
+    s.cfg.bus->try_reset(200);
     vTaskDelay(pdMS_TO_TICKS(100));
     // Re-initialize the driver (re-adds the device on the bus).
     esp_err_t err = drv->init(*s.cfg.bus, addr);
@@ -118,6 +119,15 @@ void sample_one(Role r, aqua::drivers::Sht3x* drv) {
             aqua::faults::raise(code, aqua::faults::Source::SENSOR,
                                 r == Role::WATER ? "Water sensor offline" : "Ambient sensor offline");
             attempt_recovery(r, drv);
+        }
+        // Once the fault threshold is reached, mark the cache invalid so all
+        // temperature triggers receive sensor_present=false and fail safe
+        // (e.g. heater turns OFF rather than running on stale temperature).
+        if (s.consec_err[(size_t)r] >= kMaxConsecErrors) {
+            Reading inv{};
+            inv.ts_ms = (uint64_t)esp_timer_get_time() / 1000ULL;
+            store(r, inv);                       // valid=false by default
+            s.smooth[(size_t)r] = SmoothBuf{};  // discard stale averaged samples
         }
         return;
     }

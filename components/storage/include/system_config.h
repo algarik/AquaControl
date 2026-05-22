@@ -58,6 +58,7 @@ struct SystemConfig {
     // Heater safety (0 = feature disabled).
     uint8_t  heater_device_id       = 0;     // device ID of the heater relay (0 = off)
     uint16_t heater_fault_timeout_s = 1800;  // 30 min: how long heater ON without temp rise = fault
+    float    heater_max_temp_c      = 0.0f;  // 0 = disabled; hard ceiling — force heater OFF above this °C
 
     // Sensor enable flags (can be disabled if sensor not physically present).
     bool     water_sensor_enabled   = true;
@@ -70,6 +71,9 @@ struct SystemConfig {
     // Calibration offsets applied to smoothed sensor readings (°C).
     float    water_cal_offset_c   = 0.0f;
     float    ambient_cal_offset_c = 0.0f;
+
+    // Screensaver: big 7-segment clock activates instead of plain dim.
+    bool     screensaver_enabled  = false;
 };
 
 // Load configuration from NVS. Missing keys leave defaults in place; missing

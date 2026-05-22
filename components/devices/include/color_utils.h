@@ -26,4 +26,8 @@ Rgb8 hsv_to_rgb(Hsv hsv);
 /// Takes the shorter arc around the hue circle.
 Rgb8 lerp_hsv(Rgb8 from, Rgb8 to, float t);
 
+/// Interpolate directly between two Hsv values (no RGB round-trip).
+/// Uses shortest-arc hue interpolation; output hue normalised to [0, 360).
+Hsv lerp_hsv_native(Hsv from, Hsv to, float t);
+
 }  // namespace aqua::devices

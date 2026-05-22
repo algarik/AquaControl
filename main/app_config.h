@@ -112,3 +112,20 @@
                                                               // to absorb CPU PSRAM
                                                               // bursts during LVGL render.
 #define AC_LCD_BOUNCE_PX      (AC_LCD_H_RES * AC_LCD_BOUNCE_LINES)
+
+// -----------------------------------------------------------------------------
+// M-5: g_sys_cfg correlated-field spinlock
+// Protects the correlated latitude / longitude / utc_offset_min triple in
+// g_sys_cfg against torn reads from Core 0 (scheduler pre_eval) while Core 1
+// (wizard / time_location_screen) writes them.
+// portMUX_TYPE is a simple spinlock safe for brief critical sections from
+// either core without disabling interrupts globally.
+// -----------------------------------------------------------------------------
+#include "freertos/FreeRTOS.h"
+#include "freertos/portmacro.h"
+extern portMUX_TYPE g_sys_cfg_mux;
+
+// A-1: Unified SystemConfig mutator — declared in main/sys_cfg_api.h.
+// Include that header (not this one) from files that mutate SystemConfig.
+// app_config.h is included by all components, so it must not pull in
+// storage/system_config.h or <functional>.

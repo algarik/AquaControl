@@ -256,6 +256,28 @@ constexpr const char* kEn[kCount] = {
     "min",
     "hr",
     "Duration >= period — cannot save",
+    // Temp-Map trigger specific
+    "Hysteresis (\xc2\xb0" "C)",
+    "Temp Lo (\xc2\xb0" "C)",
+    "Temp Hi (\xc2\xb0" "C)",
+    "Output rises from 0 at Temp Lo to 100% at Temp Hi.\nActivates above Temp Lo + hysteresis; turns off below Temp Lo.",
+    "Only PWM / RGB devices support analog levels",
+    "Reverse (Hi\xe2\x86\x92Lo)",
+    // Device detail — RGB / PWM
+    "Color Hi  (ON)",
+    "Color Lo  (analog min)",
+    "H\xc2\xb0",
+    "Sat",
+    "Val",
+    "Level Lo",
+    "Minimum level used with Temp/Analog mapping",
+    // audit item 21 — new keys
+    "%.0f%% RH",
+    "TEMP_MAP trigger cannot be linked to a relay",
+    "Saved",
+    "NTP: no sync in 24 h",
+    // screensaver
+    "Screensaver clock",
 };
 
 constexpr const char* kRu[kCount] = {
@@ -494,7 +516,29 @@ constexpr const char* kRu[kCount] = {
     "сек",
     "мин",
     "ч",
-    "Длительность \xe2\x89\xa5 период — сохранение невозможно",
+    "Длительность >= период — сохранение невозможно",
+    // Temp-Map trigger specific
+    "Гистерезис (\xc2\xb0" "C)",
+    "Темп. Lo (\xc2\xb0" "C)",
+    "Темп. Hi (\xc2\xb0" "C)",
+    "Выход линейно растёт от 0 при Lo до 100% при Hi.\nВключается при Lo + гистерезис; выключается ниже Lo.",
+    "Только ШИМ / RGB устройства поддерживают аналоговые уровни",
+    "Инверсия (Hi\xe2\x86\x92Lo)",
+    // Device detail — RGB / PWM
+    "Цвет Hi  (ВКЛ)",
+    "Цвет Lo  (мин. аналог)",
+    "H\xc2\xb0",
+    "Нас",
+    "Ярк",
+    "Уровень Lo",
+    "Мин. уровень для аналог. режима",
+    // audit item 21 — new keys
+    "%.0f%%",
+    "Триггер TEMP_MAP нельзя привязать к реле",
+    "Сохранено",
+    "NTP: нет синхронизации 24 ч",
+    // screensaver
+    "Часы-заставка",
 };
 
 // Compile-time sanity: tables must be the same size as the enum range.

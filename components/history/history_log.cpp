@@ -20,6 +20,7 @@ static constexpr const char* kLabel    = "spiffs";
 static constexpr const char* kFile     = "/spiffs/events.log";
 static constexpr const char* kFileBak  = "/spiffs/events.bak";
 static constexpr size_t      kFileMaxBytes = 96 * 1024;  // ~96 KB per file
+static constexpr size_t      kMaxMsgLen    = 180;         // H-3: max message length in log lines
 
 static bool                s_mounted = false;
 static SemaphoreHandle_t   s_mtx     = nullptr;
@@ -103,7 +104,8 @@ bool parse_line(const char* line, Event& out) {
 void read_all_lines(const char* path, std::vector<Event>& out) {
     FILE* f = fopen(path, "r");
     if (!f) return;
-    char buf[256];
+    // H-3: buffer sized to hold max line: ~30 header chars + kMaxMsgLen + newline + margin.
+    char buf[320];
     while (fgets(buf, sizeof(buf), f)) {
         Event ev;
         if (parse_line(buf, ev)) out.push_back(std::move(ev));
@@ -146,10 +148,18 @@ esp_err_t append(const Event& ev) {
         AC_LOGW(TAG, "fopen append failed (errno=%d)", errno);
         return ESP_FAIL;
     }
+    // H-3: cap and sanitise message to avoid line-corruption in the log file.
+    char safe_msg[kMaxMsgLen + 1];
+    size_t mi = 0;
+    for (char c : ev.msg) {
+        if (mi >= kMaxMsgLen) break;
+        safe_msg[mi++] = (c == '\n' || c == '\r') ? ' ' : c;
+    }
+    safe_msg[mi] = '\0';
     fprintf(f, "%lld|%s|%u|%u|%s\n",
             (long long)ev.ts, type_name(ev.type),
             (unsigned)ev.dev_id, (unsigned)ev.trig_id,
-            ev.msg.c_str());
+            safe_msg);
     fclose(f);
     return ESP_OK;
 }

@@ -21,10 +21,12 @@ idf_component_register(
         "triggers_screen.cpp"
         "sensors_settings_screen.cpp"
         "wizard.cpp"
+        "screensaver_screen.cpp"
         "fonts/roboto_14.c"
         "fonts/roboto_18.c"
         "fonts/roboto_24.c"
         "fonts/roboto_32.c"
+        "fonts/roboto_48.c"
     INCLUDE_DIRS "include"
     REQUIRES
         lvgl__lvgl

@@ -58,6 +58,10 @@ public:
     // the already-correct UTC epoch that SNTP placed in the system clock.
     static void after_ntp_sync();
 
+    // M-1: Check NTP staleness; raises fault 0x0500 if synced once but not in 24 h.
+    // Safe to call from any task. Intended for the scheduler's full pass.
+    static void check_health();
+
 private:
     static aqua::drivers::Ds1307* s_rtc;
     static int16_t                s_utc_offset_min;

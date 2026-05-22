@@ -18,12 +18,6 @@
 
 namespace aqua::devices {
 
-struct RgbColor {
-    uint8_t r = 255;
-    uint8_t g = 255;
-    uint8_t b = 255;
-};
-
 class RgbDevice : public IDevice {
 public:
     RgbDevice(uint8_t id, std::string name,
@@ -33,34 +27,35 @@ public:
     ~RgbDevice() override;
 
     void apply(bool active, bool force = false) override;
+    void apply_analog(float t) override;
     DeviceType get_type() const override { return DeviceType::RGB; }
 
     uint8_t base_channel() const { return base_channel_; }  // R = base, G = base+1, B = base+2
 
     // User-configurable
-    RgbColor color;
-    uint8_t  brightness_pct = 100;
-    uint16_t fade_in_min    = 0;
-    uint16_t fade_out_min   = 0;
+    // color_hsv: the "on" / hi-end colour.  h ∈ [0,360), s,v ∈ [0,1].
+    // color_lo_hsv: the lo-end colour for TEMP_MAP analog path (default: off).
+    Hsv      color_hsv    = {0.0f, 0.0f, 1.0f};   // white at full brightness
+    Hsv      color_lo_hsv = {0.0f, 0.0f, 0.0f};   // off
+    uint16_t fade_in_min  = 0;
+    uint16_t fade_out_min = 0;
 
 private:
     aqua::drivers::Pca9685* pwm_;
     uint8_t                 base_channel_;
 
     // --- HSV soft-fade engine -------------------------------------------
-    // `current_color_` / `current_brt_` hold the last FINALISED displayed
-    // colour (updated on immediate apply and on fade completion).  During a
-    // fade they serve as the FROM values; the TO values are in fade_to_*.
-    esp_timer_handle_t fade_timer_    = nullptr;
-    RgbColor           current_color_ = {};   // {0,0,0} when OFF
-    uint8_t            current_brt_   = 0;
-    RgbColor           fade_to_color_ = {};
-    uint8_t            fade_to_brt_   = 0;
+    // `current_hsv_` holds the last FINALISED displayed colour (updated on
+    // immediate apply and on fade completion).  During a fade it is the FROM
+    // value; `fade_to_hsv_` is the TO value.
+    esp_timer_handle_t fade_timer_   = nullptr;
+    Hsv                current_hsv_  = {};   // {0,0,0} when OFF
+    Hsv                fade_to_hsv_  = {};
     uint64_t           fade_start_us_ = 0;
     uint64_t           fade_dur_us_   = 1;
     portMUX_TYPE       fade_mux_      = portMUX_INITIALIZER_UNLOCKED;
 
-    void start_hsv_fade(RgbColor to_color, uint8_t to_brt, uint32_t duration_ms);
+    void start_hsv_fade(Hsv to_hsv, uint32_t duration_ms);
     void stop_hsv_fade();
     void fade_tick();
     static void fade_timer_cb(void* arg);

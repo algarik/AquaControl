@@ -18,6 +18,7 @@ enum class TriggerType : uint8_t {
     SCHEDULE = 0,
     SOLAR    = 1,
     TEMP     = 2,
+    TEMP_MAP = 3,  // Analog linear temp→output mapping; bypasses the bool pipeline.
 };
 
 class ITrigger {

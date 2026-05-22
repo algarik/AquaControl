@@ -31,6 +31,11 @@ struct Config {
     // scheduler does not take ownership; lifetime must outlive start().
     std::function<void(aqua::triggers::TriggerManager&)> pre_eval;
 
+    // Optional hook invoked each tick AFTER the bool pipeline has applied
+    // states to all devices. Used for the TEMP_MAP analog pass.
+    std::function<void(aqua::triggers::TriggerManager&,
+                       aqua::devices::DeviceManager&)> post_eval;
+
     // Optional hook invoked from Core 0 (scheduler task) immediately after
     // a device's active state changes. Thread-safe wrt LVGL: call
     // lv_async_call() inside this callback to post UI updates to Core 1.
@@ -41,6 +46,7 @@ struct Config {
     // measurable water temperature rise (sensor stuck / no heat transfer).
     uint8_t  heater_device_id       = 0;      // 0 = disabled
     uint16_t heater_fault_timeout_s = 1800;   // default 30 min
+    float    heater_max_temp_c      = 0.0f;   // 0 = disabled; hard ceiling — force OFF above this °C
 };
 
 bool start(const Config& cfg);

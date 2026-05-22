@@ -26,8 +26,11 @@ public:
 
     uint8_t channel() const { return channel_; }
 
+    void apply_analog(float t) override;
+
     // User-configurable
     uint8_t  level_pct       = 100;   // 0–100 % at full activation
+    uint8_t  level_lo_pct    = 0;     // lo-end output for TEMP_MAP analog path
     uint16_t fade_in_min     = 0;     // 0 = immediate
     uint16_t fade_out_min    = 0;
 

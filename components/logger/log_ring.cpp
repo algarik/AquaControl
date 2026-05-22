@@ -26,6 +26,38 @@ static size_t              s_head  = 0;   // next write slot
 
 namespace {
 
+// L-1: Trim any dangling partial UTF-8 sequence at the tail of buf[0..len-1].
+// buf must be NUL-terminated at buf[len]. Modifies buf in-place by placing an
+// early NUL if needed. A partial sequence is: the last byte(s) are continuation
+// bytes (0x80–0xBF) without a preceding lead byte that accounts for all of them,
+// or a lead byte that promises N continuation bytes but fewer than N follow.
+static void trim_utf8_tail(char* buf, size_t len) {
+    if (len == 0) return;
+    // Walk back to find the start of the last (possibly incomplete) sequence.
+    size_t i = len;
+    while (i > 0 && (buf[i - 1] & 0xC0) == 0x80) {
+        --i;  // skip trailing continuation bytes
+    }
+    if (i == 0) {
+        buf[0] = '\0';  // whole string is garbage
+        return;
+    }
+    // i now points to what should be a lead byte (or an ASCII byte).
+    uint8_t lead = (uint8_t)buf[i - 1];
+    size_t seq_len;
+    if      ((lead & 0x80) == 0x00) seq_len = 1;   // ASCII
+    else if ((lead & 0xE0) == 0xC0) seq_len = 2;
+    else if ((lead & 0xF0) == 0xE0) seq_len = 3;
+    else if ((lead & 0xF8) == 0xF0) seq_len = 4;
+    else { buf[i - 1] = '\0'; return; }  // invalid lead byte — drop it
+    // Number of continuation bytes actually present after this lead byte.
+    size_t have = len - (i - 1) - 1;  // bytes in buf after lead (excl. NUL)
+    if (have < seq_len - 1) {
+        // Incomplete sequence — truncate at the lead byte.
+        buf[i - 1] = '\0';
+    }
+}
+
 void push_line(const char* line) {
     if (!line || !*line) return;
     if (xSemaphoreTake(s_mtx, pdMS_TO_TICKS(10)) != pdTRUE) return;
@@ -52,7 +84,9 @@ int tee_vprintf(const char* fmt, va_list args) {
             if (tmp[i] != '\r' && tmp[i] != '\n') clean[out++] = tmp[i];
         }
         clean[out] = '\0';
-        if (out > 0) push_line(clean);
+        // L-1: Trim any partial UTF-8 sequence created by snprintf truncation.
+        trim_utf8_tail(clean, out);
+        if (out > 0 && clean[0] != '\0') push_line(clean);
     }
 
     // Forward to the original sink (UART).

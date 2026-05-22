@@ -326,6 +326,48 @@ lv_obj_t* build() {
         if (!sys_cfg.wifi_enabled) lv_obj_add_flag(wrap, LV_OBJ_FLAG_HIDDEN);
         st->wifi_fields_wrap = wrap;
 
+        // AP mode info card — visible only when AP fallback is active.
+        {
+            std::string ap_s = aqua::wifi::ap_ssid();
+            if (!ap_s.empty()) {
+                std::string ap_p = aqua::wifi::ap_password();
+                lv_obj_t* card = lv_obj_create(wrap);
+                lv_obj_set_size(card, LV_PCT(100), LV_SIZE_CONTENT);
+                lv_obj_set_style_bg_color(card, theme::color_surface(), 0);
+                lv_obj_set_style_bg_opa(card, LV_OPA_COVER, 0);
+                lv_obj_set_style_border_color(card, theme::color_warning(), 0);
+                lv_obj_set_style_border_width(card, 2, 0);
+                lv_obj_set_style_border_side(card, LV_BORDER_SIDE_LEFT, 0);
+                lv_obj_set_style_radius(card, theme::RADIUS_SM, 0);
+                lv_obj_set_style_pad_all(card, theme::PAD_SM, 0);
+                lv_obj_set_style_pad_row(card, 4, 0);
+                lv_obj_set_flex_flow(card, LV_FLEX_FLOW_COLUMN);
+
+                lv_obj_t* t = lv_label_create(card);
+                lv_label_set_text(t, LV_SYMBOL_WIFI "  AP mode — no network configured");
+                lv_obj_set_style_text_font(t, theme::font_body(), 0);
+                lv_obj_set_style_text_color(t, theme::color_warning(), 0);
+
+                char buf[96];
+                snprintf(buf, sizeof(buf), "SSID:      %s", ap_s.c_str());
+                lv_obj_t* ls = lv_label_create(card);
+                lv_label_set_text(ls, buf);
+                lv_obj_set_style_text_font(ls, theme::font_body(), 0);
+                lv_obj_set_style_text_color(ls, theme::color_text_primary(), 0);
+
+                snprintf(buf, sizeof(buf), "Password:  %s", ap_p.c_str());
+                lv_obj_t* lp = lv_label_create(card);
+                lv_label_set_text(lp, buf);
+                lv_obj_set_style_text_font(lp, theme::font_body(), 0);
+                lv_obj_set_style_text_color(lp, theme::color_text_primary(), 0);
+
+                lv_obj_t* lh = lv_label_create(card);
+                lv_label_set_text(lh, "Connect to this network,\nthen open http://192.168.4.1");
+                lv_obj_set_style_text_font(lh, theme::font_caption(), 0);
+                lv_obj_set_style_text_color(lh, theme::color_text_secondary(), 0);
+            }
+        }
+
         make_field_label(wrap, i18n::tr(i18n::LangKey::NET_SSID));
         st->ta_ssid = make_textarea(wrap, "network-name", wc.ssid.c_str());
         bind_textarea(st->ta_ssid, st);

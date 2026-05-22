@@ -30,11 +30,11 @@ const lv_font_t* font_body();      // 18 px
 const lv_font_t* font_title();     // 24 px
 const lv_font_t* font_display();   // 32 px
 
-// Built-in Montserrat at larger sizes for the dashboard "watch" face.
-// These are ASCII-only (no Cyrillic) and only used for numerics + short
-// English labels where Cyrillic is never displayed.
-const lv_font_t* font_value_xl();  // 28 px — big sensor numbers
-const lv_font_t* font_clock();     // 48 px — giant clock HH:MM
+// Roboto 32 px is reused as the large sensor-value face (replaces Montserrat 28).
+// Roboto 48 px is used for the dashboard clock (replaces Montserrat 48).
+// Both include Latin-1 supplement (°, ×, ±), full Cyrillic, and the FA icon subset.
+const lv_font_t* font_value_xl();  // 32 px — big sensor numbers (was Montserrat 28)
+const lv_font_t* font_clock();     // 48 px — giant clock HH:MM (was Montserrat 48)
 
 // Legacy names kept for any caller still using them.
 inline const lv_font_t* font_small()   { return font_caption(); }

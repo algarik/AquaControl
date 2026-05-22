@@ -2,8 +2,15 @@
 //
 // Owns all IDevice instances and provides lookup by id. The scheduler
 // iterates devices via for_each() or all().
+//
+// A-3: LOCK ORDER: DeviceManager::mutex_ → I2CBus::mutex_.
+// The scheduler acquires DeviceManager::mutex_ (via for_each) and then may
+// call device->apply() which acquires I2CBus::mutex_ internally.
+// Never acquire I2CBus::mutex_ first and then try to acquire
+// DeviceManager::mutex_ — that order causes deadlock.
 #pragma once
 
+#include <atomic>
 #include <functional>
 #include <memory>
 #include <vector>
@@ -53,9 +60,14 @@ public:
     const std::vector<std::unique_ptr<IDevice>>& all() const { return devices_; }
     size_t size() const { return devices_.size(); }
 
+    // H-4: monotonically increasing version; incremented on add() or remove().
+    // Callers (e.g. MQTT discovery guard) can detect when the device list changes.
+    uint32_t config_version() const { return config_ver_.load(std::memory_order_acquire); }
+
 private:
     std::vector<std::unique_ptr<IDevice>> devices_;
     mutable SemaphoreHandle_t mutex_ = nullptr;
+    std::atomic<uint32_t> config_ver_{0};
 };
 
 }  // namespace aqua::devices

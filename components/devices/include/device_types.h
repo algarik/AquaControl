@@ -45,6 +45,16 @@ enum class OverrideMode : uint8_t {
     INDEFINITE  = 3,  // Persists until user clears
 };
 
+// A-2: Component health check API.
+// Each hardware-owning device optionally overrides health() to report whether
+// its underlying hardware is responding. The I2C watchdog and scheduler can
+// call health() and raise typed faults via faults::raise().
+struct HealthStatus {
+    bool           ok         = true;   // true = hardware responding normally
+    const char*    fault_msg  = nullptr; // human-readable fault description (static string)
+    uint16_t       fault_code = 0;       // aqua::faults fault code (0 = no fault)
+};
+
 class IDevice {
 public:
     IDevice(uint8_t id, std::string name) : id(id), name(std::move(name)) {}
@@ -71,8 +81,20 @@ public:
     // full-pass safety net re-drives hardware even when cached state matches.
     virtual void apply(bool active, bool force = false) = 0;
 
+    // Analog output path for TEMP_MAP triggers.
+    // `t` is in [0.0, 1.0]: 0 = lo setpoint, 1 = hi setpoint.
+    // Default implementation is a no-op (devices that don't support analog
+    // output ignore the call).  Implementations should respect has_override().
+    virtual void apply_analog(float /*t*/) {}
+
     // What type am I (used by UI and serialisation).
     virtual DeviceType get_type() const = 0;
+
+    // A-2: Report hardware health. Default = always healthy.
+    // Concrete devices that can probe their hardware (relay I/O expander,
+    // PWM driver, etc.) should override this and return a non-ok status if
+    // the last I2C probe failed.
+    virtual HealthStatus health() const { return {}; }
 
     // Current commanded active state (after override / fade tracking).
     // Atomic because Core 0 (scheduler/apply) writes and Core 1 (dashboard,

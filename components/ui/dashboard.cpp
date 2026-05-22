@@ -120,7 +120,9 @@ static void label_set_if_changed(lv_obj_t* l, const char* s) {
 
 static void label_set_color_if_changed(lv_obj_t* l, lv_color_t c) {
     lv_color_t cur = lv_obj_get_style_text_color(l, LV_PART_MAIN);
-    if (cur.red == c.red && cur.green == c.green && cur.blue == c.blue) {
+    // M-3: compare via lv_color_to_u32 to avoid per-channel quantization mismatch
+    // causing spurious dirty-rect marks on every 1 Hz tick.
+    if (lv_color_to_u32(cur) == lv_color_to_u32(c)) {
         return;
     }
     lv_obj_set_style_text_color(l, c, 0);
@@ -268,7 +270,8 @@ static SensorCard make_sensor_card(lv_obj_t* parent,
     lv_obj_set_style_pad_bottom(c.root, theme::PAD_MD, 0);
     lv_obj_clear_flag(c.root, LV_OBJ_FLAG_SCROLLABLE);
     // Elevation shadow for a layered / floating look.
-    lv_obj_set_style_shadow_width(c.root, 20, 0);
+    // P-6: Reduced shadow_width 20→12 (cuts shadow mask area by 64%, subtle visual diff).
+    lv_obj_set_style_shadow_width(c.root, 12, 0);
     lv_obj_set_style_shadow_spread(c.root, 0, 0);
     lv_obj_set_style_shadow_ofs_y(c.root, 4, 0);
     lv_obj_set_style_shadow_color(c.root, lv_color_hex(0x000000), 0);
@@ -285,17 +288,31 @@ static SensorCard make_sensor_card(lv_obj_t* parent,
                            theme::color_text_secondary());
     lv_obj_align_to(c.lbl_cap, lbl_icon, LV_ALIGN_OUT_RIGHT_MID, 6, 0);
 
-    // Big value — offset up from the bottom to leave room for the bar.
-    c.lbl_value = make_label(c.root, "--",
+    // UI-1: Use a flex row for the bottom value+sub-label area so they can
+    // never overlap even with wide Fahrenheit values (e.g., "104.0°F").
+    lv_obj_t* bottom_row = lv_obj_create(c.root);
+    lv_obj_set_size(bottom_row, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_align(bottom_row, LV_ALIGN_BOTTOM_MID, 0, -(theme::PAD_XS + 4));
+    lv_obj_set_style_pad_all(bottom_row, 0, 0);
+    lv_obj_set_style_bg_opa(bottom_row, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(bottom_row, 0, 0);
+    lv_obj_clear_flag(bottom_row, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_layout(bottom_row, LV_LAYOUT_FLEX);
+    lv_obj_set_flex_flow(bottom_row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(bottom_row,
+                          LV_FLEX_ALIGN_SPACE_BETWEEN,
+                          LV_FLEX_ALIGN_END,
+                          LV_FLEX_ALIGN_END);
+
+    // Big value.
+    c.lbl_value = make_label(bottom_row, "--",
                              theme::font_value_xl(),
                              theme::color_text_primary());
-    lv_obj_align(c.lbl_value, LV_ALIGN_BOTTOM_LEFT, 0, -10);
 
     // Optional secondary info (humidity, age, etc.).
-    c.lbl_sub = make_label(c.root, "",
+    c.lbl_sub = make_label(bottom_row, "",
                            theme::font_caption(),
                            theme::color_text_secondary());
-    lv_obj_align(c.lbl_sub, LV_ALIGN_BOTTOM_RIGHT, 0, -10);
 
     // Bottom range/progress bar — shows the live reading within its range.
     c.bar = lv_bar_create(c.root);
@@ -359,7 +376,7 @@ static lv_obj_t* make_status_pill(lv_obj_t* parent,
     lv_obj_set_style_border_color(p, theme::color_outline(), 0);
     lv_obj_set_style_border_width(p, 1, 0);
     lv_obj_set_style_border_opa(p, LV_OPA_70, 0);
-    lv_obj_set_style_shadow_width(p, 16, 0);
+    lv_obj_set_style_shadow_width(p, 10, 0);  // P-6: reduced 16→10
     lv_obj_set_style_shadow_spread(p, 0, 0);
     lv_obj_set_style_shadow_ofs_y(p, 3, 0);
     lv_obj_set_style_shadow_color(p, lv_color_hex(0x000000), 0);
@@ -387,8 +404,8 @@ static void build_status_pills(State* st, lv_obj_t* parent, int16_t y_top) {
         lv_obj_set_style_border_width(dot, 0, 0);
         lv_obj_set_style_bg_color(dot, theme::color_text_disabled(), 0);
         lv_obj_set_style_bg_opa(dot, LV_OPA_COVER, 0);
-        lv_obj_set_style_shadow_width(dot, 8, 0);
-        lv_obj_set_style_shadow_spread(dot, 2, 0);
+        lv_obj_set_style_shadow_width(dot, 6, 0);   // P-6: reduced glow 8→6
+        lv_obj_set_style_shadow_spread(dot, 1, 0);  // P-6: reduced spread 2→1
         lv_obj_set_style_shadow_ofs_y(dot, 0, 0);
         lv_obj_set_style_shadow_color(dot, theme::color_text_disabled(), 0);
         lv_obj_set_style_shadow_opa(dot, LV_OPA_50, 0);
@@ -423,7 +440,9 @@ static void build_status_pills(State* st, lv_obj_t* parent, int16_t y_top) {
     lv_obj_set_flex_flow(rhs1, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(rhs1, LV_FLEX_ALIGN_END,
                           LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    st->lbl_dev_count = make_label(rhs1, "--", theme::font_title(),
+    // UI-3: Initialize to "0/0" instead of "--" so pills show meaningful
+    // zeros for 1–2 s before the first tick populates them.
+    st->lbl_dev_count = make_label(rhs1, "0/0", theme::font_title(),
                                    theme::color_text_primary());
     st->dot_dev = make_dot(rhs1);
     make_label(rhs1, LV_SYMBOL_RIGHT, theme::font_body(),
@@ -456,7 +475,7 @@ static void build_status_pills(State* st, lv_obj_t* parent, int16_t y_top) {
     lv_obj_set_flex_flow(rhs2, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(rhs2, LV_FLEX_ALIGN_END,
                           LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    st->lbl_trg_count = make_label(rhs2, "--", theme::font_title(),
+    st->lbl_trg_count = make_label(rhs2, "0/0", theme::font_title(),
                                    theme::color_text_primary());
     st->dot_trg = make_dot(rhs2);
     make_label(rhs2, LV_SYMBOL_RIGHT, theme::font_body(),
@@ -494,8 +513,23 @@ static void refresh_clock(State* st) {
     label_set_if_changed(st->lbl_clock, hh);
     label_set_if_changed(st->lbl_mm, mm);
     // Colon blinks on every odd second — a subtle heartbeat.
-    lv_obj_set_style_opa(st->lbl_clock_sep,
-        (lt.tm_sec % 2 == 0) ? LV_OPA_COVER : LV_OPA_0, 0);
+    // UI-2: Replace instant opacity toggle with a 180 ms ease-out fade.
+    {
+        const bool visible = (lt.tm_sec % 2 == 0);
+        lv_anim_t a;
+        lv_anim_init(&a);
+        lv_anim_set_var(&a, st->lbl_clock_sep);
+        lv_anim_set_exec_cb(&a, [](void* obj, int32_t v) {
+            lv_obj_set_style_opa(static_cast<lv_obj_t*>(obj),
+                                 (lv_opa_t)v, 0);
+        });
+        lv_anim_set_values(&a,
+            visible ? LV_OPA_0 : LV_OPA_COVER,
+            visible ? LV_OPA_COVER : LV_OPA_0);
+        lv_anim_set_duration(&a, 180);
+        lv_anim_set_path_cb(&a, lv_anim_path_ease_out);
+        lv_anim_start(&a);
+    }
     label_set_if_changed(st->lbl_weekday, wd);
     label_set_if_changed(st->lbl_date, dt);
 }
@@ -559,7 +593,8 @@ static void refresh_sensors(State* st) {
                                          : theme::color_warning();
         label_set_color_if_changed(st->lbl_amb_val, ac_col);
         char sub[24];
-        snprintf(sub, sizeof(sub), "%.0f%% RH",
+        // M-2: use i18n key so RU locale omits "RH" abbreviation.
+        snprintf(sub, sizeof(sub), i18n::tr(i18n::LangKey::UNIT_RH_PCT),
                  (double)amb.humidity);
         label_set_if_changed(st->lbl_amb_age, sub);
     } else {
@@ -588,6 +623,8 @@ static void refresh_sensors(State* st) {
         st->solar_valid       = r.valid;
     }
     if (st->solar_valid) {
+        // L-2: LV_SYMBOL_UP (U+F077) and LV_SYMBOL_DOWN (U+F078) verified
+        // present in roboto_24.c (generated with FA symbol range). No action needed.
         snprintf(buf, sizeof(buf),
                  LV_SYMBOL_UP " %02d:%02d\n" LV_SYMBOL_DOWN " %02d:%02d",
                  st->solar_sunrise_min / 60, st->solar_sunrise_min % 60,

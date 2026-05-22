@@ -7,6 +7,7 @@
 
 #include "ac_logger.h"
 #include "cJSON.h"
+#include "color_utils.h"
 #include "nvs_store.h"
 #include "pca9685.h"
 #include "pcf8575.h"
@@ -15,6 +16,7 @@
 #include "rgb_device.h"
 #include "schedule_trigger.h"
 #include "solar_trigger.h"
+#include "temp_map_trigger.h"
 #include "temp_trigger.h"
 
 namespace aqua::storage {
@@ -30,6 +32,7 @@ using aqua::triggers::ScheduleTrigger;
 using aqua::triggers::SolarEvent;
 using aqua::triggers::SolarTrigger;
 using aqua::triggers::TempCondition;
+using aqua::triggers::TempMapTrigger;
 using aqua::triggers::TempTrigger;
 using aqua::triggers::TriggerManager;
 using aqua::triggers::TriggerType;
@@ -108,17 +111,20 @@ esp_err_t save_devices(DeviceManager& dm) {
                 const auto* p = static_cast<const PwmDevice*>(d);
                 cJSON_AddNumberToObject(obj, "ch",       p->channel());
                 cJSON_AddNumberToObject(obj, "level",    p->level_pct);
+                cJSON_AddNumberToObject(obj, "level_lo", p->level_lo_pct);
                 cJSON_AddNumberToObject(obj, "fade_in",  p->fade_in_min);
                 cJSON_AddNumberToObject(obj, "fade_out", p->fade_out_min);
                 break;
             }
             case DeviceType::RGB: {
                 const auto* g = static_cast<const RgbDevice*>(d);
-                cJSON_AddNumberToObject(obj, "ch",       g->base_channel());
-                cJSON_AddNumberToObject(obj, "r",        g->color.r);
-                cJSON_AddNumberToObject(obj, "g",        g->color.g);
-                cJSON_AddNumberToObject(obj, "b",        g->color.b);
-                cJSON_AddNumberToObject(obj, "bright",   g->brightness_pct);
+                cJSON_AddNumberToObject(obj, "ch",   g->base_channel());
+                cJSON_AddNumberToObject(obj, "h",    g->color_hsv.h);
+                cJSON_AddNumberToObject(obj, "s",    g->color_hsv.s);
+                cJSON_AddNumberToObject(obj, "v",    g->color_hsv.v);
+                cJSON_AddNumberToObject(obj, "hlo",  g->color_lo_hsv.h);
+                cJSON_AddNumberToObject(obj, "slo",  g->color_lo_hsv.s);
+                cJSON_AddNumberToObject(obj, "vlo",  g->color_lo_hsv.v);
                 cJSON_AddNumberToObject(obj, "fade_in",  g->fade_in_min);
                 cJSON_AddNumberToObject(obj, "fade_out", g->fade_out_min);
                 break;
@@ -132,7 +138,7 @@ esp_err_t save_devices(DeviceManager& dm) {
     if (!str) return ESP_ERR_NO_MEM;
 
     esp_err_t err = NvsStore::set_blob(KEY_DEV, str, strlen(str));
-    free(str);
+    cJSON_free(str);  // L-3: use cJSON_free for cJSON-allocated strings
     AC_LOGI(TAG, "save_devices: %u entries (%s)",
             (unsigned)dm.size(), esp_err_to_name(err));
     return err;
@@ -172,6 +178,7 @@ esp_err_t load_devices(DeviceManager& dm, const DriverContext& ctx) {
                 uint8_t ch = num<uint8_t>(item, "ch", 0);
                 auto p = std::make_unique<PwmDevice>(id, std::move(name), ctx.pca, ch);
                 p->level_pct    = num<uint8_t> (item, "level",    100);
+                p->level_lo_pct = num<uint8_t> (item, "level_lo", 0);
                 p->fade_in_min  = num<uint16_t>(item, "fade_in",  0);
                 p->fade_out_min = num<uint16_t>(item, "fade_out", 0);
                 dev = std::move(p);
@@ -180,10 +187,24 @@ esp_err_t load_devices(DeviceManager& dm, const DriverContext& ctx) {
             case DeviceType::RGB: {
                 uint8_t ch = num<uint8_t>(item, "ch", 0);
                 auto g = std::make_unique<RgbDevice>(id, std::move(name), ctx.pca, ch);
-                g->color.r        = num<uint8_t> (item, "r",        255);
-                g->color.g        = num<uint8_t> (item, "g",        255);
-                g->color.b        = num<uint8_t> (item, "b",        255);
-                g->brightness_pct = num<uint8_t> (item, "bright",   100);
+                // Backward-compat: if old "r" key exists, migrate from RGB+bright.
+                if (cJSON_GetObjectItemCaseSensitive(item, "h")) {
+                    g->color_hsv.h = num<float>(item, "h", 0.0f);
+                    g->color_hsv.s = num<float>(item, "s", 0.0f);
+                    g->color_hsv.v = num<float>(item, "v", 1.0f);
+                } else {
+                    // Legacy r/g/b/bright → convert.
+                    uint8_t r     = num<uint8_t>(item, "r",      255);
+                    uint8_t gr    = num<uint8_t>(item, "g",      255);
+                    uint8_t b     = num<uint8_t>(item, "b",      255);
+                    uint8_t brt   = num<uint8_t>(item, "bright", 100);
+                    aqua::devices::Hsv hsv = aqua::devices::rgb_to_hsv({r, gr, b});
+                    hsv.v *= static_cast<float>(brt) / 100.0f;
+                    g->color_hsv = hsv;
+                }
+                g->color_lo_hsv.h = num<float>(item, "hlo", 0.0f);
+                g->color_lo_hsv.s = num<float>(item, "slo", 0.0f);
+                g->color_lo_hsv.v = num<float>(item, "vlo", 0.0f);
                 g->fade_in_min    = num<uint16_t>(item, "fade_in",  0);
                 g->fade_out_min   = num<uint16_t>(item, "fade_out", 0);
                 dev = std::move(g);
@@ -245,6 +266,15 @@ esp_err_t save_triggers(TriggerManager& tm) {
                 cJSON_AddNumberToObject(obj, "hyst",    s->hysteresis_c);
                 break;
             }
+            case TriggerType::TEMP_MAP: {
+                const auto* s = static_cast<const TempMapTrigger*>(t);
+                cJSON_AddNumberToObject(obj, "sensor",  s->sensor_id);
+                cJSON_AddNumberToObject(obj, "hyst",    s->hysteresis_c);
+                cJSON_AddNumberToObject(obj, "temp_lo", s->temp_lo_c);
+                cJSON_AddNumberToObject(obj, "temp_hi", s->temp_hi_c);
+                cJSON_AddBoolToObject  (obj, "reverse", s->reverse);
+                break;
+            }
         }
         cJSON_AddItemToArray(root, obj);
     }
@@ -253,7 +283,7 @@ esp_err_t save_triggers(TriggerManager& tm) {
     cJSON_Delete(root);
     if (!str) return ESP_ERR_NO_MEM;
     esp_err_t err = NvsStore::set_blob(KEY_TRIG, str, strlen(str));
-    free(str);
+    cJSON_free(str);  // L-3: use cJSON_free for cJSON-allocated strings
     AC_LOGI(TAG, "save_triggers: %u entries (%s)",
             (unsigned)tm.size(), esp_err_to_name(err));
     return err;
@@ -334,6 +364,16 @@ esp_err_t load_triggers(TriggerManager& tm) {
                 s->threshold_c  = num<float>  (item, "thresh", 25.0f);
                 s->condition    = (TempCondition)num<uint8_t>(item, "cond", 0);
                 s->hysteresis_c = num<float>  (item, "hyst",   0.5f);
+                trig = std::move(s);
+                break;
+            }
+            case TriggerType::TEMP_MAP: {
+                auto s = std::make_unique<TempMapTrigger>(id, std::move(name));
+                s->sensor_id    = num<uint8_t>(item, "sensor",  0);
+                s->hysteresis_c = num<float>  (item, "hyst",    0.5f);
+                s->temp_lo_c    = num<float>  (item, "temp_lo", 20.0f);
+                s->temp_hi_c    = num<float>  (item, "temp_hi", 30.0f);
+                s->reverse      = boolv(item, "reverse", false);
                 trig = std::move(s);
                 break;
             }

@@ -100,4 +100,25 @@ Rgb8 lerp_hsv(Rgb8 from, Rgb8 to, float t) {
     return hsv_to_rgb(mid);
 }
 
+// ---------------------------------------------------------------------------
+// lerp_hsv_native — interpolate directly between two Hsv values.
+// ---------------------------------------------------------------------------
+Hsv lerp_hsv_native(Hsv from, Hsv to, float t) {
+    if (t <= 0.0f) return from;
+    if (t >= 1.0f) return to;
+
+    float dh = to.h - from.h;
+    if (dh >  180.0f) dh -= 360.0f;
+    if (dh < -180.0f) dh += 360.0f;
+
+    Hsv mid{};
+    mid.h = from.h + dh * t;
+    mid.s = from.s + (to.s - from.s) * t;
+    mid.v = from.v + (to.v - from.v) * t;
+
+    if (mid.h <    0.0f) mid.h += 360.0f;
+    if (mid.h >= 360.0f) mid.h -= 360.0f;
+    return mid;
+}
+
 }  // namespace aqua::devices

@@ -18,6 +18,7 @@
 #include <vector>
 
 #include "ac_logger.h"
+#include "app_config.h"   // M-5: g_sys_cfg_mux
 #include "drum_roller.h"
 #include "esp_lvgl_port.h"
 #include "freertos/FreeRTOS.h"
@@ -843,11 +844,15 @@ static void apply_and_dismiss(WizState* wiz) {
 
     // --- System config ---
     if (ctx) {
-        ctx->utc_offset_min     = wiz->utc_offset_min;
+        // M-5: guard the correlated lat/lon/utc_offset_min triple under spinlock
+        // so Core 0 (scheduler pre_eval) cannot read a partially-written state.
+        taskENTER_CRITICAL(&g_sys_cfg_mux);
+        ctx->utc_offset_min = wiz->utc_offset_min;
+        ctx->latitude       = wiz->latitude;
+        ctx->longitude      = wiz->longitude;
+        taskEXIT_CRITICAL(&g_sys_cfg_mux);
         ctx->ntp1               = wiz->ntp1;
         ctx->ntp2               = wiz->ntp2;
-        ctx->latitude           = wiz->latitude;
-        ctx->longitude          = wiz->longitude;
         ctx->first_run_complete = true;
         ctx->language           = static_cast<aqua::storage::Language>(
                                       static_cast<uint8_t>(wiz->lang));

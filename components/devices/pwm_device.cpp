@@ -33,6 +33,20 @@ void PwmDevice::apply(bool active, bool force) {
             force ? " [force]" : "");
 }
 
+void PwmDevice::apply_analog(float t) {
+    if (!enabled || pwm_ == nullptr) return;
+    if (has_override()) return;
+    if (t < 0.0f) t = 0.0f;
+    if (t > 1.0f) t = 1.0f;
+    const uint8_t pct = static_cast<uint8_t>(
+        static_cast<float>(level_lo_pct) +
+        (static_cast<float>(level_pct) - static_cast<float>(level_lo_pct)) * t);
+    const uint16_t duty = static_cast<uint16_t>(
+        (static_cast<uint32_t>(pct) * 4095u) / 100u);
+    pwm_->set_pwm(channel_, duty);
+    current_active_.store(pct > 0, std::memory_order_relaxed);
+}
+
 PwmDevice::FadeStatus PwmDevice::fade_status() const {
     if (pwm_ == nullptr || !pwm_->is_fading(channel_)) return FadeStatus::IDLE;
     return current_active_.load(std::memory_order_relaxed)

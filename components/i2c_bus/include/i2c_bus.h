@@ -9,6 +9,7 @@
 // scheduler/watchdog tasks.
 #pragma once
 
+#include <atomic>
 #include <cstdint>
 
 #include "driver/i2c_master.h"
@@ -50,6 +51,11 @@ public:
     // Safe to call from any task; acquires the bus mutex so in-flight
     // transactions complete (or time out) first.
     esp_err_t reset(int timeout_ms = 200);
+
+    // M-4: Like reset(), but returns false immediately (without resetting)
+    // if another task is already performing a reset. Prevents double-reset
+    // when sensor_sampler and i2c_watchdog both detect a failure at once.
+    bool try_reset(int timeout_ms = 200);
 
     i2c_master_bus_handle_t handle() const { return bus_; }
     bool initialized() const { return bus_ != nullptr; }
