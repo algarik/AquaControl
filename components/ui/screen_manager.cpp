@@ -47,6 +47,7 @@ constexpr uint32_t kAnimMs  = 220;
 constexpr uint32_t kAnimDly = 0;
 
 struct PopReq     { lv_screen_load_anim_t anim; };
+struct PushReq    { lv_obj_t* new_root; lv_screen_load_anim_t anim; };
 struct ReplaceReq { lv_obj_t* new_root; lv_screen_load_anim_t anim; };
 struct PopToRootReq { lv_screen_load_anim_t anim; };
 
@@ -62,6 +63,20 @@ static void pop_async_cb(void* arg) {
     lv_obj_t* below = s.back();
     lv_screen_load_anim(below, anim, kAnimMs, kAnimDly,
                         /*auto_del=*/true);
+}
+
+static void push_async_cb(void* arg) {
+    auto* req = static_cast<PushReq*>(arg);
+    lv_obj_t* new_root = req->new_root;
+    lv_screen_load_anim_t anim = req->anim;
+    delete req;
+    if (!new_root) return;
+
+    stack().push_back(new_root);
+    s_depth.store((int)stack().size(), std::memory_order_release);
+    // auto_del=false: the outgoing screen stays alive on the stack so it
+    // can safely keep dispatching the click event that triggered the push.
+    lv_screen_load_anim(new_root, anim, kAnimMs, kAnimDly, /*auto_del=*/false);
 }
 
 static void replace_async_cb(void* arg) {
@@ -114,22 +129,13 @@ static void pop_to_root_async_cb(void* arg) {
 
 void push(lv_obj_t* new_root, Transition tr) {
     if (new_root == nullptr) return;
-    // M-6: push() acquires the LVGL lock synchronously and must be called from
-    // the LVGL task (Core 1) — from an LVGL event callback or lv_async_call()
-    // callback. Calling it from Core 0 will deadlock because lvgl_port_lock()
-    // is already held by Core 1 during event dispatch.
-    assert(xPortGetCoreID() == 1 && "push() must be called from Core 1 / LVGL task");
-    if (!lvgl_port_lock(200)) {
-        AC_LOGE(TAG, "push: LVGL lock timeout");
-        return;
+    // Deferred: runs from the LVGL task between event dispatches, so push()
+    // is safe from any core/task — same pattern as replace(), pop().
+    auto* req = new PushReq{new_root, to_lv_anim(tr)};
+    if (lv_async_call(push_async_cb, req) != LV_RESULT_OK) {
+        AC_LOGE(TAG, "push: lv_async_call failed");
+        delete req;
     }
-    stack().push_back(new_root);
-    s_depth.store((int)stack().size(), std::memory_order_release);
-    // auto_del=false: the outgoing screen stays alive on the stack so it
-    // can safely keep dispatching the click event that triggered the push.
-    lv_screen_load_anim(new_root, to_lv_anim(tr), kAnimMs, kAnimDly,
-                        /*auto_del=*/false);
-    lvgl_port_unlock();
 }
 
 void pop(Transition tr) {

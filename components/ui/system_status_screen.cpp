@@ -3,11 +3,11 @@
 // Read-only information screen; shows:
 //   * Firmware version (IDF_VER + project version from esp_app_desc)
 //   * Active faults (from faults::active())
-//   * Recent event history (latest 20 entries from history::recent())
 //   * [Restart] and [Factory Reset] action buttons
 //     - Restart: calls esp_restart() after a 1 s delay via esp_timer
 //     - Factory Reset: shows a confirmation msgbox; on confirm erases NVS
 //       and reboots
+//   * Recent event history (latest 50 entries, newest first)
 #include "system_status_screen.h"
 
 #include <cstdio>
@@ -59,6 +59,22 @@ static lv_obj_t* make_body_label(lv_obj_t* parent, const char* text,
     lv_obj_set_width(lbl, LV_PCT(100));
     lv_label_set_long_mode(lbl, LV_LABEL_LONG_WRAP);
     return lbl;
+}
+
+static const char* event_type_label(aqua::history::EventType t) {
+    using aqua::history::EventType;
+    switch (t) {
+        case EventType::TRIG_EDGE:    return "trig";
+        case EventType::DEV_OVERRIDE: return "ovr";
+        case EventType::FAULT_RAISE:  return "fault+";
+        case EventType::FAULT_CLEAR:  return "fault-";
+        case EventType::BOOT:         return "boot";
+        case EventType::NTP_SYNC:     return "ntp";
+        case EventType::WIFI_CONNECT: return "wifi+";
+        case EventType::WIFI_LOST:    return "wifi-";
+        case EventType::SENSOR:       return "sens";
+        default:                      return "?";
+    }
 }
 
 static lv_obj_t* make_action_button(lv_obj_t* parent, const char* text,
@@ -227,31 +243,6 @@ static void populate_scroll(lv_obj_t* scroll) {
         }
     }
 
-    // ------- Recent Events -------
-    make_section_label(scroll, tr(LangKey::SYS_RECENT_EVENTS));
-    {
-        // M-7: cap at 200 events to avoid OOM from loading the entire 96 KB
-        // events.log into heap on devices with fragmented memory after 12+ hours.
-        auto evts = aqua::history::recent(200);
-        if (evts.empty()) {
-            make_body_label(scroll, tr(LangKey::SYS_NO_EVENTS), theme::color_text_disabled());
-        } else {
-            for (const auto& ev : evts) {
-                char row[120];
-                if (ev.ts == 0) {
-                    snprintf(row, sizeof(row), "(no time)  %s", ev.msg.c_str());
-                } else {
-                    struct tm tm_s{};
-                    localtime_r(&ev.ts, &tm_s);
-                    char ts[20];
-                    strftime(ts, sizeof(ts), "%m-%d %H:%M:%S", &tm_s);
-                    snprintf(row, sizeof(row), "%s  %s", ts, ev.msg.c_str());
-                }
-                make_body_label(scroll, row, theme::color_text_secondary());
-            }
-        }
-    }
-
     // ------- Actions -------
     make_section_label(scroll, tr(LangKey::SYS_ACTIONS));
 
@@ -269,6 +260,30 @@ static void populate_scroll(lv_obj_t* scroll) {
         make_action_button(scroll, factory_lbl,
                            theme::color_error(),
                            on_factory_reset, nullptr);
+    }
+
+    // ------- Recent Events (last section; 50 entries max) -------
+    make_section_label(scroll, tr(LangKey::SYS_RECENT_EVENTS));
+    {
+        auto evts = aqua::history::recent(50);
+        if (evts.empty()) {
+            make_body_label(scroll, tr(LangKey::SYS_NO_EVENTS), theme::color_text_disabled());
+        } else {
+            for (const auto& ev : evts) {
+                char row[160];
+                const char* tname = event_type_label(ev.type);
+                if (ev.ts == 0) {
+                    snprintf(row, sizeof(row), "(no time)  [%s] %s", tname, ev.msg.c_str());
+                } else {
+                    struct tm tm_s{};
+                    localtime_r(&ev.ts, &tm_s);
+                    char ts[20];
+                    strftime(ts, sizeof(ts), "%m-%d %H:%M:%S", &tm_s);
+                    snprintf(row, sizeof(row), "%s  [%s] %s", ts, tname, ev.msg.c_str());
+                }
+                make_body_label(scroll, row, theme::color_text_secondary());
+            }
+        }
     }
 }
 
