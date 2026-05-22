@@ -221,6 +221,13 @@ CONFIG_BOOTLOADER_LOG_LEVEL_INFO=y
 # Main task stack — keep generous for app_main initialization sequence
 # -----------------------------------------------------------------------------
 CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
+
+# -----------------------------------------------------------------------------
+# sys_evt (default ESP event loop) task stack.
+# The got-IP callback calls ntp::start() + history::append() (SPIFFS fopen/
+# fprintf/fclose), which needs more than the default 2304 bytes.
+# -----------------------------------------------------------------------------
+CONFIG_ESP_SYSTEM_EVENT_TASK_STACK_SIZE=5120
 CONFIG_ESP_MAIN_TASK_AFFINITY_CPU0=y
 
 # -----------------------------------------------------------------------------

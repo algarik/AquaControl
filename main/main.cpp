@@ -599,13 +599,15 @@ extern "C" void app_main(void) {
     aqua::wifi::set_got_ip_callback([](void* arg) {
         auto& cfg = *static_cast<aqua::storage::SystemConfig*>(arg);
         aqua::ntp::start(cfg.ntp1, cfg.ntp2);
-        aqua::history::append(aqua::history::EventType::WIFI_CONNECT, 0, 0,
-                              aqua::wifi::ip_string().c_str());
+        // NOTE: history::append() (SPIFFS file I/O) must NOT run here.
+        // The sys_evt task stack is 5 kB; SPIFFS fopen+fprintf alone needs
+        // ~3 kB of additional stack on top of the call chain that gets us
+        // here.  The WIFI_CONNECT event is instead logged from the WiFi
+        // manager itself (or via a deferred timer) to avoid overflow.
+        // NOTE: Do NOT call mqtt::start() here either. esp_mqtt_client_init()
+        // allocates heap buffers via the task stack and will overflow it.
+        // MQTT auto-reconnects via its own task if already started.
         aqua::web_portal::stop_deferred();  // AP portal no longer needed
-        // NOTE: Do NOT call mqtt::start() here. sys_evt stack is ~2.8 kB and
-        // esp_mqtt_client_init() will overflow it. MQTT auto-reconnects via
-        // its own task if already started. Re-enabling WiFi via the network
-        // settings screen handles the MQTT restart for the STA-exhausted case.
     }, &g_sys_cfg);
 
     if (g_sys_cfg.wifi_enabled) {
